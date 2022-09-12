@@ -16,8 +16,8 @@ class  Simulator_OU():
         self.n = n_assets
         self.T = T
         self.kappa = np.linspace(1, 2, self.n).reshape(1,-1)
-        self.sigma = np.linspace(0.5, 0.1, self.n).reshape(1,-1)
-        self.mu = np.linspace(0.25, 0.05, self.n).reshape(1,-1)
+        self.sigma = np.linspace(0.3, 0.2, self.n).reshape(1,-1)
+        self.mu = np.linspace(0.075, 0.05, self.n).reshape(1,-1)
         self.rho = 0.3
         self.S0 = np.ones(self.n).reshape(1,-1)
         

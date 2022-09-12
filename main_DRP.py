@@ -15,16 +15,16 @@ import matplotlib.pyplot as plt
 import copy
 
 #%%
-Simulator = Simulator_OU(n_assets=5, T=1)
+Simulator = Simulator_OU(n_assets=2, T=2)
 
-DRP = DynamicRiskParity(Simulator=Simulator, alpha=0.75, p=0.8)
+DRP = DynamicRiskParity(Simulator=Simulator, alpha=0.75, p=0.7)
 # DRP.B[0,0,0] = 0.5
 # DRP.B[0,0,1] = 0.2
 # DRP.B[1,0,0] = 0.2
 # DRP.B[1,0,1] = 0.1
 # for i in range(10):
 #     DRP.EstimateValueFunction(N_iter = 50)
-DRP.Train(n_iter=10_000, n_print=100, M_value_iter=10, M_policy_iter=1, batch_size=512)
+DRP.Train(n_iter=1_000, n_print=50, M_value_iter=5, M_policy_iter=5, batch_size=4096)
 
 #%% various alpha levels
 alpha = [0.7, 0.8, 0.9, 0.95]

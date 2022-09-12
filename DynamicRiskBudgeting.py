@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on Thu Aug  4 14:45:51 2022
+Created on Mon Sep 12 11:54:57 2022
 
-@author: sebja
+@author: jaimunga
 """
 
 import torch
@@ -89,46 +89,7 @@ class CVaRNet(nn.Module):
         output = self.softplus(self.prop_h_to_out(h))
         
         return output
-
-class ANN(nn.Module):
-    
-    def __init__(self, n_in, n_out, nNodes, nLayers, softplus=False, flatten=False ):
-        super(ANN, self).__init__()
-        
-        # single hidden layer
-        self.prop_in_to_h = nn.Linear( n_in, nNodes)
-        
-        self.prop_h_to_h = nn.ModuleList([nn.Linear(nNodes, nNodes) for i in range(nLayers-1)])
-            
-        self.prop_h_to_out = nn.Linear(nNodes, n_out)
-        
-        self.g = nn.SiLU()
-        self.f = nn.Softplus()
-        
-        self.softplus = softplus
-        self.flatten = flatten
-
-    def forward(self, x):
-        
-        # input into  hidden layer
-        if self.flatten:
-            h = self.prop_in_to_h(x.transpose(0,1).flatten(start_dim=1))            
-        else:
-            h = self.prop_in_to_h(x)
-            
-        h = self.g(h)
-        
-        for prop in self.prop_h_to_h:
-            h = self.g(prop(h))
-        
-        # hidden layer to output layer - no activation
-        y = self.prop_h_to_out(h)
-        
-        if self.softplus:
-            y = self.f(y)
-        
-        return y
-    
+   
 class betaNet(nn.Module):
     
     def __init__(self, nIn, nOut, gru_hidden=5, gru_layers=5, linear_hidden = 36, linear_layers=5, test_mode=False):
@@ -193,7 +154,7 @@ class InitialWealthNet(nn.Module):
         
         return h
     
-class DynamicRiskParity():
+class DynamicRiskBudgeting():
     
     def __init__(self, Simulator : Simulator_OU, X0=1, B = 0, alpha=0.8, p=0.5, test_mode = False):
         
