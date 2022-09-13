@@ -732,7 +732,7 @@ class DynamicRiskParity():
         # compute the value function at points in time            
         V = torch.zeros((self.T+1, batch_size))
         for j in range(self.T):
-            V[j,:] = self.CVaR(t = j*self.dt, h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()
+            V[j,:] = self.risk_measure(t = j*self.dt, h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()
         
         costs_plus_V_onestep_ahead  = (costs + V[1:,:]).detach()
         

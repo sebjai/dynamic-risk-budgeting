@@ -24,7 +24,7 @@ DRP = DynamicRiskParity(Simulator=Simulator, alpha=0.75, p=0.7)
 # DRP.B[1,0,1] = 0.1
 # for i in range(10):
 #     DRP.EstimateValueFunction(N_iter = 50)
-DRP.Train(n_iter=1_000, n_print=50, M_value_iter=5, M_policy_iter=5, batch_size=4096)
+DRP.Train(n_iter=1_000, n_print=50, M_value_iter=5, M_policy_iter=5, batch_size=1024)
 
 #%% various alpha levels
 alpha = [0.7, 0.8, 0.9, 0.95]

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Sep 12 11:54:57 2022
+Created on Mon Sep 12 20:58:31 2022
 
 @author: jaimunga
 """
@@ -34,19 +34,16 @@ class Net(nn.Module):
         
         self.g = nn.SiLU()
         
-    def forward(self, t, h, Y):
+    def forward(self, h, Y):
         
         Y_flat = Y.flatten(start_dim=-2)
         
-        h = torch.cat((t*torch.ones(Y_flat.shape[:-1]).unsqueeze(axis=-1), 
-                       h.flatten(start_dim=-2), 
+        h = torch.cat((h.flatten(start_dim=-2), 
                        Y_flat), 
                       axis=-1)
         
-        h = self.prop_in_to_h(h)
+        h = self.g(self.prop_in_to_h(h))
             
-        h = self.g(h)
-        
         for prop in self.prop_h_to_h:
             h = self.g(prop(h))
         
@@ -70,18 +67,13 @@ class CVaRNet(nn.Module):
         self.g = nn.SiLU()
         self.softplus = nn.Softplus()
         
-    def forward(self, t, h, Y):
+    def forward(self, h, Y):
         
-        Y_flat = Y.flatten(start_dim=-2)
-        
-        h = torch.cat((t*torch.ones(Y_flat.shape[:-1]).unsqueeze(axis=-1), 
-                       h.flatten(start_dim=-2), 
-                       Y_flat),
+        h = torch.cat((h.flatten(start_dim=-2), 
+                       Y.flatten(start_dim=-2)),
                       axis=-1)
-        h = self.prop_in_to_h(h)
+        h = self.g( self.prop_in_to_h(h) )
             
-        h = self.g(h)
-        
         for prop in self.prop_h_to_h:
             h = self.g(prop(h))
         
@@ -89,10 +81,49 @@ class CVaRNet(nn.Module):
         output = self.softplus(self.prop_h_to_out(h))
         
         return output
-   
+
+# class ANN(nn.Module):
+    
+#     def __init__(self, n_in, n_out, nNodes, nLayers, softplus=False, flatten=False ):
+#         super(ANN, self).__init__()
+        
+#         # single hidden layer
+#         self.prop_in_to_h = nn.Linear( n_in, nNodes)
+        
+#         self.prop_h_to_h = nn.ModuleList([nn.Linear(nNodes, nNodes) for i in range(nLayers-1)])
+            
+#         self.prop_h_to_out = nn.Linear(nNodes, n_out)
+        
+#         self.g = nn.SiLU()
+#         self.f = nn.Softplus()
+        
+#         self.softplus = softplus
+#         self.flatten = flatten
+
+#     def forward(self, x):
+        
+#         # input into  hidden layer
+#         if self.flatten:
+#             h = self.prop_in_to_h(x.transpose(0,1).flatten(start_dim=1))            
+#         else:
+#             h = self.prop_in_to_h(x)
+            
+#         h = self.g(h)
+        
+#         for prop in self.prop_h_to_h:
+#             h = self.g(prop(h))
+        
+#         # hidden layer to output layer - no activation
+#         y = self.prop_h_to_out(h)
+        
+#         if self.softplus:
+#             y = self.f(y)
+        
+#         return y
+    
 class betaNet(nn.Module):
     
-    def __init__(self, nIn, nOut, gru_hidden=5, gru_layers=5, linear_hidden = 36, linear_layers=5, test_mode=False):
+    def __init__(self, nIn, nOut, gru_hidden=5, gru_layers=5, linear_hidden = 36, linear_layers=5):
         super(betaNet, self).__init__()
 
         self.gru = torch.nn.GRU(input_size=nIn, 
@@ -100,37 +131,38 @@ class betaNet(nn.Module):
                                 num_layers=gru_layers, 
                                 batch_first=True)
         
-        self.gru_to_hidden = nn.Linear(gru_hidden*gru_layers, linear_hidden)
+        self.gru_to_hidden = nn.Linear(gru_hidden*gru_layers+2+nOut, linear_hidden)
         self.linear_hidden_to_hidden = nn.ModuleList([nn.Linear(linear_hidden, linear_hidden) for i in range(linear_layers-1)])
         self.hidden_to_out = nn.Linear(linear_hidden, nOut)
+        
+        torch.nn.init.normal_(self.hidden_to_out.weight, mean=0.0, std=1.0)
+        torch.nn.init.normal_(self.hidden_to_out.bias, mean=0.0, std=1.0)
+        torch.nn.init.normal_(self.gru_to_hidden.weight, mean=0.0, std=1.0)
+        torch.nn.init.normal_(self.gru_to_hidden.bias, mean=0.0, std=1.0)
         
         self.g = nn.SiLU()
         self.softmax = nn.Softmax(dim=1)
         self.softplus = nn.Softplus()
-        self.test_mode = test_mode
         self.nOut = nOut
         
     def forward(self, h, Y):
         
-        if not self.test_mode:
+        _, h_out = self.gru(Y.clone(), h.clone())
         
-            _, h_out = self.gru(Y.clone(), h.clone())
+        # pdb.set_trace()
+        
+        x = torch.cat((h.transpose(0,1).flatten(start_dim=-2), 
+                       Y.flatten(start_dim=-2)),
+                      axis=-1)
+        x = self.gru_to_hidden(x)
+        # x = self.gru_to_hidden(h_out.transpose(0,1).flatten(start_dim=1))
+        x = self.g(x)
+        for linear in self.linear_hidden_to_hidden:
+            x = self.g(linear(x))
             
-            # ********** ADD IN CONCATENATION OF Y ??? *****
-            x = self.gru_to_hidden(h_out.transpose(0,1).flatten(start_dim=1))
-            x = self.g(x)
-            for linear in self.linear_hidden_to_hidden:
-                x = self.g(linear(x))
-                
-            x = self.hidden_to_out(x)
-            
-            beta = x
-        else:
-            
-            beta = ((torch.ones(Y.shape[0], self.nOut) / self.nOut)*self.X0) / self.S0.reshape(1,-1)
-            h_out= 1.0*h
-            
-        beta = self.softmax(beta)
+        x = self.hidden_to_out(x)
+        
+        beta = self.softmax(x)
     
         return h_out, beta
         
@@ -154,9 +186,9 @@ class InitialWealthNet(nn.Module):
         
         return h
     
-class DynamicRiskBudgeting():
+class DynamicRiskParity():
     
-    def __init__(self, Simulator : Simulator_OU, X0=1, B = 0, alpha=0.8, p=0.5, test_mode = False):
+    def __init__(self, Simulator : Simulator_OU, X0=1, B = 0, alpha=0.8, p=0.5):
         
         self.Simulator = Simulator
         self.X0 = X0        
@@ -181,11 +213,10 @@ class DynamicRiskBudgeting():
                               gru_hidden=self.Simulator.n, 
                               gru_layers=5, 
                               linear_hidden=32, 
-                              linear_layers=5, 
-                              test_mode=test_mode)
+                              linear_layers=5)
         self.beta_optimizer = optim.AdamW(self.beta.parameters(), lr = 0.001)
         
-        self.wealth_0 = InitialWealthNet()
+        self.wealth_0= InitialWealthNet()
         self.wealth_0_optimizer = optim.AdamW(self.wealth_0.parameters(), lr = 0.001)
         
 
@@ -211,26 +242,26 @@ class DynamicRiskBudgeting():
         
         gru_total_hidden = self.beta.gru.num_layers*self.beta.gru.hidden_size
                 
-        self.mu = Net(n_in=gru_total_hidden+3+self.Simulator.n, n_out=1, nNodes=32, nLayers=5)
+        self.mu = Net(n_in=gru_total_hidden+2+self.Simulator.n, n_out=1, nNodes=32, nLayers=5)
         self.mu_target = copy.deepcopy(self.mu)
         self.mu_optimizer = optim.AdamW(self.mu.parameters(), lr=0.001)        
         
-        self.psi = Net(n_in=gru_total_hidden+3+self.Simulator.n, n_out=1, nNodes=32, nLayers=5)
+        self.psi = Net(n_in=gru_total_hidden+2+self.Simulator.n, n_out=1, nNodes=32, nLayers=5)
         self.psi_target = copy.deepcopy(self.psi)
         self.psi_optimizer = optim.AdamW(self.psi.parameters(), lr=0.001)
         
-        self.chi = CVaRNet(n_in=gru_total_hidden+3+self.Simulator.n, n_out=1, nNodes=32, nLayers=5)
+        self.chi = CVaRNet(n_in=gru_total_hidden+2+self.Simulator.n, n_out=1, nNodes=32, nLayers=5)
         self.chi_optimizer = optim.AdamW(self.chi.parameters(), lr=0.001)
         self.chi_target = copy.deepcopy(self.chi)
         
-        self.VaR = lambda t, h, Y : self.psi(t, h, Y)
-        self.CVaR = lambda t, h, Y : self.psi(t, h, Y) + self.chi(t, h, Y)
+        self.VaR = lambda h, Y : self.psi(h, Y)
+        self.CVaR = lambda h, Y : self.psi(h, Y) + self.chi(h, Y)
         
-        self.risk_measure = lambda t, h, Y :  (self.p * self.CVaR(t, h, Y) + (1.0-self.p)* self.mu(t, h, Y))
+        self.risk_measure = lambda h, Y :  (self.p * self.CVaR(h, Y) + (1.0-self.p)* self.mu(h, Y))
         
-        self.VaR_target = lambda t, h, Y : self.psi_target(t, h, Y)
-        self.CVaR_target = lambda t, h, Y : self.psi_target(t, h, Y) + self.chi_target(t, h, Y)
-        self.risk_measure_target = lambda t, h, Y :  (self.p * self.CVaR_target(t, h, Y) + (1.0-self.p)* self.mu_target(t, h, Y))
+        self.VaR_target = lambda h, Y : self.psi_target(h, Y)
+        self.CVaR_target = lambda h, Y : self.psi_target(h, Y) + self.chi_target(h, Y)
+        self.risk_measure_target = lambda h, Y :  (self.p * self.CVaR_target(h, Y) + (1.0-self.p)* self.mu_target(h, Y))
         
         
     def __Score__(self, VaR, CVaR, mu, Y):
@@ -240,6 +271,7 @@ class DynamicRiskBudgeting():
         B = (CVaR+C)*(1.0-self.alpha)
         
         score = torch.mean(torch.log( (CVaR+C)/(Y+C)) - (CVaR/(CVaR+C)) + A/B)
+        
         score += torch.mean((mu-Y)**2)
         
         return score
@@ -321,20 +353,17 @@ class DynamicRiskBudgeting():
             
             loss = 0.0
             
-            pdb.set_trace()
             for i in range(self.T-1, -1, -1):
-                t = i*self.dt
-                
+
                 cost_plus_V_one_ahead = costs[i,:]
                 if i < self.T-1:
-                    cost_plus_V_one_ahead += self.risk_measure_target(t+self.dt, h[i+2,...].transpose(0,1), Y[i+1,...])
+                    cost_plus_V_one_ahead += self.risk_measure_target(h[i+2,...].transpose(0,1), Y[i+1,...])
                 
                 cost_plus_V_one_ahead = cost_plus_V_one_ahead.detach()
-                loss += self.__Score__(self.VaR(t, h[i+1,...].transpose(0,1), Y[i,...]),
-                                       self.CVaR(t, h[i+1,...].transpose(0,1), Y[i,...]),
-                                       self.mu(t, h[i+1,...].transpose(0,1), Y[i,...]),
+                loss += self.__Score__(self.VaR(h[i+1,...].transpose(0,1), Y[i,...]),
+                                       self.CVaR(h[i+1,...].transpose(0,1), Y[i,...]),
+                                       self.mu(h[i+1,...].transpose(0,1), Y[i,...]),
                                        cost_plus_V_one_ahead)
-                
                 
             loss.backward()
             
@@ -375,7 +404,7 @@ class DynamicRiskBudgeting():
             # compute the value function at points in time            
             V = torch.zeros((self.T+1, batch_size))
             for j in range(self.T):
-                V[j,:] = self.risk_measure_target(t = j*self.dt, h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()
+                V[j,:] = self.risk_measure_target(h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()
             
             costs_plus_V_onestep_ahead  = (costs + V[1:,:]).detach()
 
@@ -528,6 +557,8 @@ class DynamicRiskBudgeting():
                 
     def PlotValueFunc(self):
         
+        print("need to check and also add VaR and mean outputs")
+        
         # pdb.set_trace()
         
         S1_1, S2_1 = torch.meshgrid(torch.linspace(0.8, 1.1, 100),torch.linspace(0.8, 2.0, 100))
@@ -566,7 +597,7 @@ class DynamicRiskBudgeting():
             
                 h_1[:,:,i,:], beta_0 = self.beta(h_0[:,:,i,:], Y_0[:,i,:].unsqueeze(axis=1))
             
-                CVaR[j,:,i] = self.CVaR(self.dt, h_1[:,:,i,:].transpose(0,1), Y_1[:,i,:].unsqueeze(axis=1)).squeeze()
+                CVaR[j,:,i] = self.CVaR(h_1[:,:,i,:].transpose(0,1), Y_1[:,i,:].unsqueeze(axis=1)).squeeze()
         
             im = ax[j].contourf(S1_1[:,:,0].numpy(), S2_1[:,:,0].numpy(), CVaR[j,:,:].detach().numpy())
             ax[j].set_title('$X_1={0:.2f}$'.format(x_1))
@@ -581,8 +612,6 @@ class DynamicRiskBudgeting():
         ax[-2].set_ylabel('$S^{(2)}_1$')
 
         plt.show()
-        
-         
         
     def Plotbeta(self, print_beta=False):
         
@@ -694,7 +723,8 @@ class DynamicRiskBudgeting():
         # compute the value function at points in time            
         V = torch.zeros((self.T+1, batch_size))
         for j in range(self.T):
-            V[j,:] = self.CVaR(t = j*self.dt, h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()
+            V[j,:] = self.risk_measure(h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()
+            # V[j,:] = self.CVaR(h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()            
         
         costs_plus_V_onestep_ahead  = (costs + V[1:,:]).detach()
         
