@@ -90,44 +90,44 @@ class CVaRNet(nn.Module):
         
         return output
 
-class ANN(nn.Module):
+# class ANN(nn.Module):
     
-    def __init__(self, n_in, n_out, nNodes, nLayers, softplus=False, flatten=False ):
-        super(ANN, self).__init__()
+#     def __init__(self, n_in, n_out, nNodes, nLayers, softplus=False, flatten=False ):
+#         super(ANN, self).__init__()
         
-        # single hidden layer
-        self.prop_in_to_h = nn.Linear( n_in, nNodes)
+#         # single hidden layer
+#         self.prop_in_to_h = nn.Linear( n_in, nNodes)
         
-        self.prop_h_to_h = nn.ModuleList([nn.Linear(nNodes, nNodes) for i in range(nLayers-1)])
+#         self.prop_h_to_h = nn.ModuleList([nn.Linear(nNodes, nNodes) for i in range(nLayers-1)])
             
-        self.prop_h_to_out = nn.Linear(nNodes, n_out)
+#         self.prop_h_to_out = nn.Linear(nNodes, n_out)
         
-        self.g = nn.SiLU()
-        self.f = nn.Softplus()
+#         self.g = nn.SiLU()
+#         self.f = nn.Softplus()
         
-        self.softplus = softplus
-        self.flatten = flatten
+#         self.softplus = softplus
+#         self.flatten = flatten
 
-    def forward(self, x):
+#     def forward(self, x):
         
-        # input into  hidden layer
-        if self.flatten:
-            h = self.prop_in_to_h(x.transpose(0,1).flatten(start_dim=1))            
-        else:
-            h = self.prop_in_to_h(x)
+#         # input into  hidden layer
+#         if self.flatten:
+#             h = self.prop_in_to_h(x.transpose(0,1).flatten(start_dim=1))            
+#         else:
+#             h = self.prop_in_to_h(x)
             
-        h = self.g(h)
+#         h = self.g(h)
         
-        for prop in self.prop_h_to_h:
-            h = self.g(prop(h))
+#         for prop in self.prop_h_to_h:
+#             h = self.g(prop(h))
         
-        # hidden layer to output layer - no activation
-        y = self.prop_h_to_out(h)
+#         # hidden layer to output layer - no activation
+#         y = self.prop_h_to_out(h)
         
-        if self.softplus:
-            y = self.f(y)
+#         if self.softplus:
+#             y = self.f(y)
         
-        return y
+#         return y
     
 class betaNet(nn.Module):
     

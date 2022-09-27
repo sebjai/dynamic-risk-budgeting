@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Sep 12 20:58:31 2022
+Created on Fri Sep 23 16:22:24 2022
 
-@author: jaimunga
+@author: sebja
 """
+
 
 import torch
 import torch.nn as nn
@@ -22,7 +23,7 @@ import copy
 
 class Net(nn.Module):
     
-    def __init__(self, n_in, n_out, nNodes, nLayers, soft_plus_out=False):
+    def __init__(self, n_in, n_out, nNodes, nLayers, out_activation=None):
         super(Net, self).__init__()
         
         # single hidden layer
@@ -34,8 +35,11 @@ class Net(nn.Module):
         
         self.g = nn.SiLU()
         
-        self.soft_plus_out = soft_plus_out
+        
+        self.out_activation = out_activation
+        
         self.softplus = nn.Softplus()
+        self.sigmoid = nn.Sigmoid()
         
     def forward(self, h, Y):
         
@@ -53,8 +57,10 @@ class Net(nn.Module):
         # hidden layer to output layer
         output = self.prop_h_to_out(h)
         
-        if self.soft_plus_out:
+        if self.out_activation == 'softplus':
             output = self.softplus(output)
+        elif self.out_activation == 'sigmoid':
+            output = self.sigmoid(output)
         
         return output
     
@@ -71,11 +77,6 @@ class betaNet(nn.Module):
         self.gru_to_hidden = nn.Linear(gru_hidden*gru_layers+2+nOut, linear_hidden)
         self.linear_hidden_to_hidden = nn.ModuleList([nn.Linear(linear_hidden, linear_hidden) for i in range(linear_layers-1)])
         self.hidden_to_out = nn.Linear(linear_hidden, nOut)
-        
-        # torch.nn.init.normal_(self.hidden_to_out.weight, mean=0.0, std=1.0)
-        # torch.nn.init.normal_(self.hidden_to_out.bias, mean=0.0, std=1.0)
-        # torch.nn.init.normal_(self.gru_to_hidden.weight, mean=0.0, std=1.0)
-        # torch.nn.init.normal_(self.gru_to_hidden.bias, mean=0.0, std=1.0)
         
         self.g = nn.SiLU()
         self.softmax = nn.Softmax(dim=1)
@@ -154,14 +155,14 @@ class DynamicRiskParity():
         self.wealth_0= InitialWealthNet()
         self.wealth_0_optimizer = optim.AdamW(self.wealth_0.parameters(), lr = 0.001)
         
-
-        
         self.__initialize_CVaR_VaR_Mean_Net__()
         
         # for storing losses
         self.VaR_CVaR_mean_loss = []
+        self.F_loss = []
         self.beta_loss = []
         self.mean_beta = []
+        
         
         self.W_0 = []
         self.RC = []
@@ -176,16 +177,24 @@ class DynamicRiskParity():
         # the states consists of the output of the gru layers
         
         gru_total_hidden = self.beta.gru.num_layers*self.beta.gru.hidden_size
-                
-        self.mu = Net(n_in=gru_total_hidden+2+self.Simulator.n, n_out=1, nNodes=32, nLayers=5, soft_plus_out=False)
-        self.mu_target = copy.deepcopy(self.mu)
-        self.mu_optimizer = optim.AdamW(self.mu.parameters(), lr=0.001)        
+        n_in = gru_total_hidden+2+self.Simulator.n
         
-        self.psi = Net(n_in=gru_total_hidden+2+self.Simulator.n, n_out=1, nNodes=32, nLayers=5, soft_plus_out=False)
+        # for conditional cdf of c_t + V_{t+1}
+        self.F = Net(n_in=n_in+1, n_out=1, nNodes=16, nLayers=3, out_activation='sigmoid')
+        self.F_optimizer = optim.AdamW(self.F.parameters(), lr=0.001)
+        
+        # for conditional mean
+        self.mu = Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5)
+        self.mu_target = copy.deepcopy(self.mu)
+        self.mu_optimizer = optim.AdamW(self.mu.parameters(), lr=0.001)
+        
+        # for conditional VaR
+        self.psi = Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5)
         self.psi_target = copy.deepcopy(self.psi)
         self.psi_optimizer = optim.AdamW(self.psi.parameters(), lr=0.001)
         
-        self.chi = Net(n_in=gru_total_hidden+2+self.Simulator.n, n_out=1, nNodes=32, nLayers=5, soft_plus_out=True)
+        # for increment from conditional VaR to conditional CVaR
+        self.chi = Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, out_activation='softplus')
         self.chi_optimizer = optim.AdamW(self.chi.parameters(), lr=0.001)
         self.chi_target = copy.deepcopy(self.chi)
         
@@ -199,15 +208,36 @@ class DynamicRiskParity():
         self.risk_measure_target = lambda h, Y :  (self.p * self.CVaR_target(h, Y) + (1.0-self.p)* self.mu_target(h, Y))
         
         
-    def __Score__(self, VaR, CVaR, mu, Y):
+    def __Score__(self, VaR, CVaR, mu, X):
         
         C = 10.0
-        A = ((Y<=VaR)*1.0-self.alpha)*VaR + (Y>VaR)*Y
+        A = ((X<=VaR)*1.0-self.alpha)*VaR + (X>VaR)*X
         B = (CVaR+C)*(1.0-self.alpha)
         
-        score = torch.mean(torch.log( (CVaR+C)/(Y+C)) - (CVaR/(CVaR+C)) + A/B)
+        # for conditional VaR & CVaR
+        score = torch.mean(torch.log( (CVaR+C)/(X+C)) - (CVaR/(CVaR+C)) + A/B)
         
-        score += torch.mean((mu-Y)**2)
+        # for conditional mean
+        score += torch.mean((mu-X)**2)
+        
+        return score
+    
+    def __F_Score__(self, h, Y, X):
+        
+        z = torch.linspace(-10,10,101).reshape(101,1,1,1).repeat(1,Y.shape[0], Y.shape[1], 1)
+        dz = z[1,0,0,0]-z[0,0,0,0]
+        
+        score = 0
+        ones = torch.ones(Y.shape[:-1]).unsqueeze(axis=-1)
+        
+        Z = torch.concat((Y.unsqueeze(axis=0).repeat(101,1,1,1), 
+                          z), 
+                         axis=3)
+        
+        F = self.F(h.unsqueeze(axis=0).repeat(101,1,1,1), Z)
+        
+        score = torch.mean( torch.sum((F-1.0*(z[...,0]>=X.unsqueeze(axis=0).repeat(101,1,1)))**2*dz, 
+                                      axis=0) )
         
         return score
     
@@ -287,16 +317,20 @@ class DynamicRiskParity():
                                        self.CVaR(h[i+1,...].transpose(0,1), Y[i,...]),
                                        self.mu(h[i+1,...].transpose(0,1), Y[i,...]),
                                        cost_plus_V_one_ahead)
+                # loss += self.__F_Score__(h[i+1,...].transpose(0,1), Y[i,...], cost_plus_V_one_ahead)
 
             self.psi_optimizer.zero_grad()
             self.chi_optimizer.zero_grad()
             self.mu_optimizer.zero_grad()
+            # self.F_optimizer.zero_grad()
                 
-            loss.backward(retain_graph=True)
+            # loss.backward(retain_graph=True)
+            loss.backward()
             
             self.psi_optimizer.step()
             self.chi_optimizer.step()
             self.mu_optimizer.step()
+            # self.F_optimizer.step()
             
             self.VaR_CVaR_mean_loss.append(loss.item())
             
@@ -312,10 +346,49 @@ class DynamicRiskParity():
         self.chi_target = copy.deepcopy(self.chi)
         self.psi_target = copy.deepcopy(self.psi)
         self.mu_target = copy.deepcopy(self.mu)
+        
+        
+    def Update_F(self, N_iter  = 100, batch_size = 256, n_print=100):
+        
+        count = 0
+        for j in range(N_iter):
+        
+            costs, h, Y, beta, theta, S, wealth = self.__RunEpoch__(batch_size)
+            
+            # costs = theta^T \Delta S
+            costs = costs.unsqueeze(axis=2)
+            
+            loss = 0.0
+            
+            for i in range(self.T-1, -1, -1):
+
+                cost_plus_V_one_ahead = costs[i,:]
                 
+                if i < self.T-1:
+                    cost_plus_V_one_ahead += self.risk_measure_target(h[i+2,...].transpose(0,1), Y[i+1,...])
+                
+                loss += self.__F_Score__(h[i+1,...].transpose(0,1), Y[i,...], cost_plus_V_one_ahead)
+
+            self.F_optimizer.zero_grad()
+                
+            # loss.backward(retain_graph=True)
+            loss.backward()
+            
+            self.F_optimizer.step()
+            
+            self.F_loss.append(loss.item())
+            
+            self.W_0.append(self.wealth_0(1).item())
+            
+            count += 1
+            if np.mod(count, n_print) == 0:
+                
+                plt.plot(self.F_loss)
+                plt.yscale('log')
+                plt.show()
         
     def __Compute_V_Gamma__(self, costs, h, Y):
-            
+        
             batch_size = costs.shape[1]
             # compute the value function at points in time            
             V = torch.zeros((self.T+1, batch_size))
@@ -326,15 +399,44 @@ class DynamicRiskParity():
 
             # evalute the Gamma processes
             U = torch.zeros((self.T, batch_size))
+            
+            Z = torch.concat((Y,
+                              costs_plus_V_onestep_ahead.unsqueeze(axis=2).unsqueeze(axis=3)), 
+                             axis=3)
+            # for j in range(self.T):
+            #     ecdf = ECDF(costs_plus_V_onestep_ahead[j,:])
+            #     U[j,:] = torch.tensor(ecdf(costs_plus_V_onestep_ahead[j,:])).float()
+            
             for j in range(self.T):
-                ecdf = ECDF(costs_plus_V_onestep_ahead[j,:])
-                U[j,:] = torch.tensor(ecdf(costs_plus_V_onestep_ahead[j,:])).float()
+                U[j,:] = self.F(h[j,...].transpose(0,1), Z[j,...])[:,0]
                 
             Gamma = self.gamma(U)
                 
             cumprod_Gamma = torch.cumprod(Gamma, axis=0)
             
             return V, cumprod_Gamma
+        
+    def RiskContributions(self, batch_size=2048):
+        
+        costs, h, Y, beta, theta, S, X = self.__RunEpoch__(batch_size)
+        
+        V, cumprod_Gamma = self.__Compute_V_Gamma__(costs.detach(), h.detach(), Y.detach())
+        
+        Delta_S = torch.diff(S, axis=0)
+
+        # compute loss
+        RC = torch.zeros((self.T, self.n))
+        RC_err = torch.zeros((self.T, self.n))
+        for j in range(self.T):
+            
+            for n in range(self.n):
+            
+                Z = theta[j,:,n]  * (-Delta_S[j,:,n])  * cumprod_Gamma[j,:]
+                
+                RC[j,n] = torch.mean( Z )
+                RC_err[j,n] = torch.std( Z )/np.sqrt(batch_size)
+
+        return RC, RC_err  
                 
     def Update_Policy(self, N_iter=100, batch_size = 256):
         
@@ -360,6 +462,9 @@ class DynamicRiskParity():
                 gradV_0 += torch.mean(A, axis=0)
                 penalty += torch.mean(B, axis=0)
                 
+            # RC, _ = self.RiskContributions(batch_size)
+            # grad_loss = torch.sum(RC) - penalty
+            
             grad_loss =  gradV_0 - penalty
             # grad_loss =  torch.mean(V[0,:]) - penalty
                 
@@ -377,9 +482,6 @@ class DynamicRiskParity():
             
             self.V_0.append(V[0,0].item())
             
-            RC, RC_err = self.RiskContributions()
-            self.RC.append(RC.detach().numpy())       
-            
             self.mean_beta.append( torch.mean(beta, axis=1).reshape(-1).detach().numpy() )
             
             count+=1
@@ -388,6 +490,9 @@ class DynamicRiskParity():
                 plt.plot(self.beta_loss)
                 plt.yscale('log')
                 plt.show()
+                
+        RC, RC_err = self.RiskContributions()
+        self.RC.append(RC.detach().numpy())  
                 
     def Train(self, n_iter=10_000, n_print = 10, M_value_iter = 10, M_policy_iter=1, batch_size=256):
         
@@ -400,6 +505,7 @@ class DynamicRiskParity():
         for i in tqdm(range(n_iter)):
             
             self.Update_ValueFunction(N_iter=M_value_iter, n_print=500, batch_size=batch_size)
+            self.Update_F(N_iter=M_value_iter, n_print=500, batch_size=batch_size)
             self.Update_Policy(N_iter=M_policy_iter, batch_size=batch_size)
             
             count += 1
@@ -414,7 +520,7 @@ class DynamicRiskParity():
     def __Initialize_W_0__(self):
         
         
-        self.wealth_0.scale = 5
+        self.wealth_0.scale = 50
         
         # for i in range(10):
             
@@ -469,7 +575,7 @@ class DynamicRiskParity():
         plt.subplot(2,3,4)
         RC = np.array(self.RC).reshape(-1,self.T*self.n)
         plt.plot(RC, linewidth=1)
-        plt.ylim(0,0.2)
+        plt.ylim(0,0.4)
         plt.title(r'$RC$')
         
         plt.subplot(2,3,5) 
@@ -645,28 +751,6 @@ class DynamicRiskParity():
         ax1[0,0].set_ylabel('$S^{(2)}_1$')        
         
         plt.show()
-        
-    def RiskContributions(self, batch_size=2048):
-        
-        costs, h, Y, beta, theta, S, X = self.__RunEpoch__(batch_size)
-        
-        V, cumprod_Gamma = self.__Compute_V_Gamma__(costs.detach(), h.detach(), Y.detach())
-        
-        Delta_S = torch.diff(S, axis=0)
-
-        # compute loss
-        RC = torch.zeros((self.T, self.n))
-        RC_err = torch.zeros((self.T, self.n))
-        for j in range(self.T):
-            
-            for n in range(self.n):
-            
-                Z = theta[j,:,n]  * (-Delta_S[j,:,n])  * cumprod_Gamma[j,:]
-                
-                RC[j,n] = torch.mean( Z )
-                RC_err[j,n] = torch.std( Z )/np.sqrt(batch_size)
-
-        return RC, RC_err        
         
     def PlotPaths(self, batch_size=1, title=None):
         
