@@ -74,7 +74,7 @@ class betaNet(nn.Module):
                                 num_layers=gru_layers, 
                                 batch_first=True)
         
-        self.gru_to_hidden = nn.Linear(gru_hidden*gru_layers+2+nOut, linear_hidden)
+        self.gru_to_hidden = nn.Linear(gru_hidden*gru_layers+1+nOut, linear_hidden)
         self.linear_hidden_to_hidden = nn.ModuleList([nn.Linear(linear_hidden, linear_hidden) for i in range(linear_layers-1)])
         self.hidden_to_out = nn.Linear(linear_hidden, nOut)
         
@@ -142,18 +142,20 @@ class DynamicRiskParity():
         
         #
         # the percentage of wealth in each asset: 
-        # states = past asset prices (encoded in a GRU), current time, and wealth
+        # states = past asset prices (encoded in a GRU), current time
         #
-        self.beta = betaNet(nIn=self.n+2, 
-                              nOut=self.Simulator.n, 
-                              gru_hidden=self.Simulator.n, 
-                              gru_layers=5, 
-                              linear_hidden=32, 
-                              linear_layers=5)
-        self.beta_optimizer = optim.AdamW(self.beta.parameters(), lr = 0.001)
+        self.beta = betaNet(nIn=self.n+1,
+                            nOut=self.Simulator.n,
+                            gru_hidden=self.Simulator.n,
+                            gru_layers=5,
+                            linear_hidden=32,
+                            linear_layers=5)
+        self.beta_optimizer = optim.AdamW(self.beta.parameters(), 
+                                          lr = 0.001)
         
         self.wealth_0= InitialWealthNet()
-        self.wealth_0_optimizer = optim.AdamW(self.wealth_0.parameters(), lr = 0.01)
+        self.wealth_0_optimizer = optim.AdamW(self.wealth_0.parameters(), 
+                                              lr = 0.002)
         
         self.__initialize_CVaR_VaR_Mean_Net__()
         
@@ -162,7 +164,8 @@ class DynamicRiskParity():
         self.F_loss = []
         self.beta_loss = []
         self.mean_beta = []
-        
+
+        self.eta = 0.1 # the Lagrange multiplier factor        
         
         self.W_0 = []
         self.RC = []
@@ -177,7 +180,7 @@ class DynamicRiskParity():
         # the states consists of the output of the gru layers
         
         gru_total_hidden = self.beta.gru.num_layers*self.beta.gru.hidden_size
-        n_in = gru_total_hidden+2+self.Simulator.n
+        n_in = gru_total_hidden+1+self.Simulator.n
         
         # for conditional cdf of c_t + V_{t+1}
         self.F = Net(n_in=n_in+1, n_out=1, nNodes=16, nLayers=3, out_activation='sigmoid')
@@ -194,6 +197,7 @@ class DynamicRiskParity():
         self.psi_optimizer = optim.AdamW(self.psi.parameters(), lr=0.001)
         
         # for increment from conditional VaR to conditional CVaR
+        # i.e., CVaR = chi + psi
         self.chi = Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, out_activation='softplus')
         self.chi_optimizer = optim.AdamW(self.chi.parameters(), lr=0.001)
         self.chi_target = copy.deepcopy(self.chi)
@@ -201,16 +205,18 @@ class DynamicRiskParity():
         self.VaR = lambda h, Y : self.psi(h, Y)
         self.CVaR = lambda h, Y : self.psi(h, Y) + self.chi(h, Y)
         
-        self.risk_measure = lambda h, Y :  (self.p * self.CVaR(h, Y) + (1.0-self.p)* self.mu(h, Y))
+        self.risk_measure = lambda h, Y :  (self.p * self.CVaR(h, Y) 
+                                            + (1.0-self.p)* self.mu(h, Y))
         
         self.VaR_target = lambda h, Y : self.psi_target(h, Y)
         self.CVaR_target = lambda h, Y : self.psi_target(h, Y) + self.chi_target(h, Y)
-        self.risk_measure_target = lambda h, Y :  (self.p * self.CVaR_target(h, Y) + (1.0-self.p)* self.mu_target(h, Y))
+        self.risk_measure_target = lambda h, Y :  (self.p * self.CVaR_target(h, Y) 
+                                                   + (1.0-self.p)* self.mu_target(h, Y))
         
         
     def __Score__(self, VaR, CVaR, mu, X):
         
-        C = 10.0
+        C = 5.0
         A = ((X<=VaR)*1.0-self.alpha)*VaR + (X>VaR)*X
         B = (CVaR+C)*(1.0-self.alpha)
         
@@ -224,12 +230,9 @@ class DynamicRiskParity():
     
     def __F_Score__(self, h, Y, X):
         
-        N = 1001
-        z = torch.linspace(-20,20,N).reshape(N,1,1,1).repeat(1,Y.shape[0], Y.shape[1], 1)
+        N = 101
+        z = torch.linspace(-2,2,N).reshape(N,1,1,1).repeat(1,Y.shape[0], Y.shape[1], 1)
         dz = z[1,0,0,0]-z[0,0,0,0]
-        
-        score = 0
-        ones = torch.ones(Y.shape[:-1]).unsqueeze(axis=-1)
         
         Z = torch.concat((Y.unsqueeze(axis=0).repeat(N,1,1,1), 
                           z), 
@@ -248,7 +251,7 @@ class DynamicRiskParity():
         S = torch.tensor(self.Simulator.Simulate(batch_size)).float().transpose(0,1)
         
         # number of each asset invested
-        beta = torch.zeros((self.T, batch_size,  self.n))
+        beta = torch.zeros((self.T, batch_size, self.n))
         
         #
         # store the hidden states from all layers and each time
@@ -261,10 +264,9 @@ class DynamicRiskParity():
         wealth[0,:] = self.wealth_0(batch_size).reshape(-1)              
         
         # concatenate t_i, wealth, and asset prices
-        Y = torch.zeros((self.T, batch_size, 1, self.Simulator.n+2))
+        Y = torch.zeros((self.T, batch_size, 1, self.Simulator.n+1))
         ones = torch.ones((batch_size,1))
-        Y[0,...] = torch.cat( (torch.zeros((batch_size,1)), wealth[0,:].reshape(-1,1), S[0,:,:]), 
-                             axis=1).unsqueeze(axis=1)
+        Y[0,...] = torch.cat( (torch.zeros((batch_size,1)), S[0,:,:]), axis=1).unsqueeze(axis=1)
         
         # push through the neural-net to get weights
         h[1,...] , beta[0,:,:] = self.beta(h[0,...], Y[0,...])
@@ -278,9 +280,8 @@ class DynamicRiskParity():
             # new wealth at period end
             wealth[i,:] = torch.sum( theta[i-1,:,:] * S[i,:,:], axis=1).clone()
             
-            # concatenate t_i, X, and asset prices    
-            Y[i,...] = torch.cat(((i*self.dt)*ones, wealth[i,:].reshape(-1,1), S[i,:,:]),
-                                 axis=1).unsqueeze(axis=1)
+            # concatenate t_i, and asset prices    
+            Y[i,...] = torch.cat(((i*self.dt)*ones, S[i,:,:]), axis=1).unsqueeze(axis=1)
             
             # push through the neural-net to get new number of assets
             h[i+1,...], beta[i,:,:] = self.beta(h[i,...], Y[i,...])
@@ -302,7 +303,7 @@ class DynamicRiskParity():
         
             costs, h, Y, beta, theta, S, wealth = self.__RunEpoch__(batch_size)
             
-            # costs = theta^T \Delta S
+            # costs = -theta^T \Delta S
             costs = costs.unsqueeze(axis=2)
             
             loss = 0.0
@@ -312,7 +313,8 @@ class DynamicRiskParity():
                 cost_plus_V_one_ahead = costs[i,:]
                 
                 if i < self.T-1:
-                    cost_plus_V_one_ahead += self.risk_measure_target(h[i+2,...].transpose(0,1), Y[i+1,...])
+                    cost_plus_V_one_ahead += self.risk_measure_target(h[i+2,...].transpose(0,1), 
+                                                                      Y[i+1,...])
                 
                 loss += self.__Score__(self.VaR(h[i+1,...].transpose(0,1), Y[i,...]),
                                        self.CVaR(h[i+1,...].transpose(0,1), Y[i,...]),
@@ -356,8 +358,10 @@ class DynamicRiskParity():
         
             costs, h, Y, beta, theta, S, wealth = self.__RunEpoch__(batch_size)
             
-            # costs = theta^T \Delta S
-            costs = costs.unsqueeze(axis=2)
+            # costs = -theta^T \Delta S
+            costs = costs.unsqueeze(axis=2).detach()
+            h = h.detach()
+            Y = Y.detach()
             
             loss = 0.0
             
@@ -366,9 +370,12 @@ class DynamicRiskParity():
                 cost_plus_V_one_ahead = costs[i,:]
                 
                 if i < self.T-1:
-                    cost_plus_V_one_ahead += self.risk_measure_target(h[i+2,...].transpose(0,1), Y[i+1,...])
+                    cost_plus_V_one_ahead += self.risk_measure_target(h[i+2,...].transpose(0,1), 
+                                                                      Y[i+1,...]).detach()
                 
-                loss += self.__F_Score__(h[i+1,...].transpose(0,1), Y[i,...], cost_plus_V_one_ahead)
+                loss += self.__F_Score__(h[i+1,...].transpose(0,1), 
+                                         Y[i,...], 
+                                         cost_plus_V_one_ahead)
 
             self.F_optimizer.zero_grad()
                 
@@ -390,11 +397,15 @@ class DynamicRiskParity():
         
     def __Compute_V_Gamma__(self, costs, h, Y):
         
+            pdb.set_trace()
+            
             batch_size = costs.shape[1]
+            
             # compute the value function at points in time            
             V = torch.zeros((self.T+1, batch_size))
             for j in range(self.T):
-                V[j,:] = self.risk_measure_target(h = h[j+1,...].transpose(0,1), Y=Y[j,...]).squeeze()
+                V[j,:] = self.risk_measure_target(h = h[j+1,...].transpose(0,1), 
+                                                  Y=Y[j,...]).squeeze()
             
             costs_plus_V_onestep_ahead  = (costs + V[1:,:]).detach()
 
@@ -404,12 +415,9 @@ class DynamicRiskParity():
             Z = torch.concat((Y,
                               costs_plus_V_onestep_ahead.unsqueeze(axis=2).unsqueeze(axis=3)), 
                              axis=3)
-            # for j in range(self.T):
-            #     ecdf = ECDF(costs_plus_V_onestep_ahead[j,:])
-            #     U[j,:] = torch.tensor(ecdf(costs_plus_V_onestep_ahead[j,:])).float()
             
             for j in range(self.T):
-                U[j,:] = self.F(h[j,...].transpose(0,1), Z[j,...])[:,0]
+                U[j,:] = self.F(h[j+1,...].transpose(0,1), Z[j,...])[:,0]
                 
             Gamma = self.gamma(U)
                 
@@ -463,10 +471,15 @@ class DynamicRiskParity():
                 gradV_0 += torch.mean(A, axis=0)
                 penalty += torch.mean(B, axis=0)
                 
-            # RC, _ = self.RiskContributions(batch_size)
             # grad_loss = torch.sum(RC) - penalty
             
-            grad_loss =  gradV_0 - 0.1*penalty
+            grad_loss =  gradV_0 - self.eta*penalty 
+            
+            # deviation from B errors
+            RC, _ = self.RiskContributions(batch_size)
+            # B_error = torch.sum((self.B.squeeze()-RC)**2)
+            # grad_loss += 2*self.eta*B_error
+            
             # grad_loss =  torch.mean(V[0,:]) - penalty
                 
             self.beta_optimizer.zero_grad()
@@ -477,7 +490,7 @@ class DynamicRiskParity():
             self.beta_optimizer.step()
             self.wealth_0_optimizer.step()
             
-            real_loss = V[0,0] - penalty
+            real_loss = V[0,0] - self.eta*penalty
             
             self.beta_loss.append( real_loss.item())
             
@@ -492,8 +505,8 @@ class DynamicRiskParity():
                 plt.yscale('log')
                 plt.show()
                 
-        RC, RC_err = self.RiskContributions()
-        self.RC.append(RC.detach().numpy())  
+            # RC, RC_err = self.RiskContributions(500)
+            self.RC.append(RC.detach().numpy())  
                 
     def Train(self, n_iter=10_000, n_print = 10, M_value_iter = 10, M_policy_iter=1, batch_size=256):
         
@@ -501,12 +514,24 @@ class DynamicRiskParity():
         
         self.__Initialize_W_0__()
         
+        print("training value function on initialization...")
+        self.Update_ValueFunction(N_iter= 10, n_print=500, batch_size=batch_size)
+        print("training F on initialization...")
+        self.Update_F(N_iter= 10, n_print= 500, batch_size=batch_size)
+        
+        print("main training...")
         self.PlotPaths(500)
+
         count = 0
         for i in tqdm(range(n_iter)):
             
+            # this updates mu, psi, chi
             self.Update_ValueFunction(N_iter=M_value_iter, n_print=500, batch_size=batch_size)
+            
+            # this udpates F
             self.Update_F(N_iter=5, n_print=500, batch_size=batch_size)
+            
+            # this updates beta and w_0
             self.Update_Policy(N_iter=M_policy_iter, batch_size=batch_size)
             
             count += 1
@@ -514,10 +539,8 @@ class DynamicRiskParity():
             if np.mod(count, n_print)==0:
                 
                 self.PlotSummary()
-                # self.PlotPaths(500)
+                self.PlotPaths(500)
                 self.PlotHist()
-                
-                # self.PlotPaths(500)
                 
     def __Initialize_W_0__(self):
         
@@ -582,6 +605,18 @@ class DynamicRiskParity():
         plt.tight_layout()
         plt.show()
             
+    def MovingAverage(self,x, n):
+        
+        y = np.zeros(len(x))
+        
+        for i in range(len(x)):
+            if i < n:
+                y[i] = x[i]
+            else:
+                y[i] = np.mean(x[i-n:i])
+                
+        return y
+        
     def PlotSummary(self):
         
         plt.subplot(2,3,1)
@@ -597,15 +632,19 @@ class DynamicRiskParity():
         plt.title(r'$W_0$')
         
         plt.subplot(2,3,4)
-        RC = np.array(self.RC).reshape(-1,self.T*self.n)
-        plt.plot(RC, linewidth=1)
-        plt.title(r'$RC$')
+        RC = np.array(self.RC)
+        RC_flat = RC.reshape(len(self.RC),-1)
+        for i in range(RC_flat.shape[1]):
+            plt.plot(self.MovingAverage(RC_flat[:,i],10))
+        plt.ylabel('RC')
+        
         
         plt.subplot(2,3,5) 
-        V_0_est = np.sum(RC, axis=1)
+        V_0_est = np.sum(np.sum(RC, axis=1),axis=1)
         plt.plot(V_0_est, label=r'$\sum RC$', linewidth=1) 
         plt.plot(self.V_0, label=r'$V_0$', linewidth=1)
-        plt.axhline(1, linestyle='--', color='k')
+        plt.axhline(0.1, linestyle='--', color='k')
+        plt.ylim(0,0.5)
         plt.legend(fontsize=8)
         
         plt.subplot(2,3,6)
@@ -613,7 +652,21 @@ class DynamicRiskParity():
         plt.title(r'$\mathbb{E}[\beta_{t,i}]$')
         
         plt.tight_layout()
-        plt.show()        
+        plt.show()      
+        
+        idx = 1
+        for k in range(self.n):
+            for j in range(self.T):
+               
+                plt.subplot(self.n, self.T, idx)
+                plt.plot(RC[:,j,k],alpha=0.5)
+                plt.plot(self.MovingAverage(RC[:,j,k],10))
+                plt.ylabel(r'$RC_{' + str(j) + ','+str(k)+ '}$')
+                plt.axhline(self.B[j,0,k]*self.eta, linestyle='--', color='k')
+                idx += 1
+        plt.suptitle(r'$RC$')
+        plt.tight_layout()
+        plt.show()      
                 
     def PlotValueFunc(self):
         
@@ -686,10 +739,9 @@ class DynamicRiskParity():
         
         S1_0 = self.Simulator.S0[0][0] * ones
         S2_0 = self.Simulator.S0[0][1] * ones
-        X_0 = self.X0 * ones
         
         # concatenate t_i, X, and asset prices
-        Y_0 = torch.cat((0*ones, X_0, S1_0, S2_0), axis=2)
+        Y_0 = torch.cat((0*ones, S1_0, S2_0), axis=2)
 
         h_0 = torch.zeros((self.beta.gru.num_layers, 
                            S1_0.shape[0], 
@@ -705,7 +757,7 @@ class DynamicRiskParity():
         fig1, ax1 = plt.subplots(nrows=self.n, ncols=X_1.shape[0], sharex='all', sharey='all')        
         for j, x_1 in enumerate(X_1):
             
-            Y_1 = torch.cat(((1*self.dt)*ones, x_1*ones, S1_1, S2_1), axis=2)
+            Y_1 = torch.cat(((1*self.dt)*ones, S1_1, S2_1), axis=2)
             
             beta_0 = torch.zeros((S1_0.shape[0], S1_0.shape[0], self.n))
             beta_1 = beta_0.clone()
@@ -829,32 +881,32 @@ class DynamicRiskParity():
         plt.tight_layout()
         plt.show()
         
-        
+        cmap = ['brg', 'twilight']
         for j in range(1, self.T):
-            fig = plt.figure()
             
-            plt.subplot(1,2,1)
-            plt.title(r'$\beta_{0:1d}^1$'.format(j))
-            im1=plt.scatter(S[j,:,0], S[j,:,1], s=1, alpha=0.5, c=beta[1,:,0], cmap='jet', vmin=0, vmax=1)
-            # plt.scatter(S[1,:,0], S[1,:,1], s=1, alpha=0.5, c=beta[1,:,0], vmin=qtl[0], vmax=qtl[1], cmap='jet')
-            plt.xlabel(r'$S_{0:1d}^1$'.format(j))
-            plt.ylabel(r'$S_{0:1d}^2$'.format(j))
+            fig = plt.figure(figsize=(12,6))
             
-            plt.subplot(1,2,2)
-            plt.title(r'$\beta_{0:1d}^2$'.format(j))
-            plt.scatter(S[j,:,0], S[j,:,1], s=1, alpha=0.5, c=beta[1,:,1], cmap='jet', vmin=0, vmax=1)
-            # im = plt.scatter(S[1,:,0], S[1,:,1], s=1, alpha=0.5, c=beta[1,:,1], vmin=qtl[0], vmax=qtl[1], cmap='jet')
-            plt.xlabel(r'$S_{0:1d}^1$'.format(j))
-            plt.ylabel(r'$S_{0:1d}^2$'.format(j))
-    
+            for k in range(self.n):
+                
+                ax = plt.subplot(1,self.n,k+1)
+                
+                plt.title(r'$\beta_{0:1d}^{1:1d}$'.format(j,k))
+                qtl = np.floor(np.quantile(beta[j,:,k], [0.1,0.9])*20)/20
+                im1=plt.scatter(S[j,:,0], S[j,:,1], 
+                                s=10, alpha=0.8, c=beta[j,:,k], 
+                                cmap='brg', vmin=0.3, vmax=0.7)
+                # plt.scatter(S[1,:,0], S[1,:,1], s=1, alpha=0.5, c=beta[1,:,0], vmin=qtl[0], vmax=qtl[1], cmap='jet')
+                plt.xlabel(r'$S_{0:1d}^1$'.format(j),fontsize=16)
+                plt.ylabel(r'$S_{0:1d}^2$'.format(j),fontsize=16)
+                plt.xlim(0.7, 1.4)
+                plt.ylim(0.8, 1.3)
+                
             plt.tight_layout(pad=2)
             
             fig.subplots_adjust(right=0.8)
             cbar_ax = fig.add_axes([0.85, 0.15, 0.05, 0.7])
-            # cbar_ax = fig.add_axes([0.45, 0.15, 0.05, 0.7])
-            # fig.colorbar(im2, cax=cbar_ax)
             fig.colorbar(im1, cax=cbar_ax)
-    
+        
             plt.show()
         
         return S, beta

@@ -224,12 +224,9 @@ class DynamicRiskParity():
     
     def __F_Score__(self, h, Y, X):
         
-        N = 1001
-        z = torch.linspace(-20,20,N).reshape(N,1,1,1).repeat(1,Y.shape[0], Y.shape[1], 1)
+        N = 101
+        z = torch.linspace(-2,2,N).reshape(N,1,1,1).repeat(1,Y.shape[0], Y.shape[1], 1)
         dz = z[1,0,0,0]-z[0,0,0,0]
-        
-        score = 0
-        ones = torch.ones(Y.shape[:-1]).unsqueeze(axis=-1)
         
         Z = torch.concat((Y.unsqueeze(axis=0).repeat(N,1,1,1), 
                           z), 
@@ -606,6 +603,7 @@ class DynamicRiskParity():
         plt.plot(V_0_est, label=r'$\sum RC$', linewidth=1) 
         plt.plot(self.V_0, label=r'$V_0$', linewidth=1)
         plt.axhline(1, linestyle='--', color='k')
+        plt.ylim(0,0.5)
         plt.legend(fontsize=8)
         
         plt.subplot(2,3,6)
