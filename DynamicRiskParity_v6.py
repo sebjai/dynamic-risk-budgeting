@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Created on Fri Sep 23 16:22:24 2022
+Created on Tue Oct 11 09:32:39 2022
 
 @author: sebja
 """
-
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
 from Simulator_OU import Simulator_OU
-from statsmodels.distributions.empirical_distribution import ECDF
 from tqdm import tqdm
 
 import pdb
@@ -34,7 +32,6 @@ class Net(nn.Module):
         self.prop_h_to_out = nn.Linear(nNodes, n_out)
         
         self.g = nn.SiLU()
-        
         
         self.out_activation = out_activation
         
@@ -74,7 +71,7 @@ class betaNet(nn.Module):
                                 num_layers=gru_layers, 
                                 batch_first=True)
         
-        self.gru_to_hidden = nn.Linear(gru_hidden*gru_layers+1+nOut, linear_hidden)
+        self.gru_to_hidden = nn.Linear(gru_hidden*gru_layers+2+nOut, linear_hidden)
         self.linear_hidden_to_hidden = nn.ModuleList([nn.Linear(linear_hidden, linear_hidden) for i in range(linear_layers-1)])
         self.hidden_to_out = nn.Linear(linear_hidden, nOut)
         
@@ -142,9 +139,9 @@ class DynamicRiskParity():
         
         #
         # the percentage of wealth in each asset: 
-        # states = past asset prices (encoded in a GRU), current time
+        # states = past asset prices (encoded in a GRU), current time and wealth
         #
-        self.beta = betaNet(nIn=self.n+1,
+        self.beta = betaNet(nIn=self.n+2,
                             nOut=self.Simulator.n,
                             gru_hidden=self.Simulator.n,
                             gru_layers=5,
@@ -180,7 +177,7 @@ class DynamicRiskParity():
         # the states consists of the output of the gru layers
         
         gru_total_hidden = self.beta.gru.num_layers*self.beta.gru.hidden_size
-        n_in = gru_total_hidden+1+self.Simulator.n
+        n_in = gru_total_hidden+2+self.Simulator.n
         
         # for conditional cdf of c_t + V_{t+1}
         self.F = Net(n_in=n_in+1, n_out=1, nNodes=16, nLayers=3, out_activation='sigmoid')
@@ -268,9 +265,11 @@ class DynamicRiskParity():
         wealth[0,:] = self.wealth_0(batch_size).reshape(-1)              
         
         # concatenate t_i, wealth, and asset prices
-        Y = torch.zeros((self.T, batch_size, 1, self.Simulator.n+1))
+        Y = torch.zeros((self.T, batch_size, 1, self.Simulator.n+2))
         ones = torch.ones((batch_size,1))
-        Y[0,...] = torch.cat( (torch.zeros((batch_size,1)), S[0,:,:]), axis=1).unsqueeze(axis=1)
+        Y[0,...] = torch.cat( (torch.zeros((batch_size,1)), 
+                               wealth[0,:].reshape(-1,1), 
+                               S[0,:,:]), axis=1).unsqueeze(axis=1)
         
         # push through the neural-net to get weights
         h[1,...] , beta[0,:,:] = self.beta(h[0,...], Y[0,...])
@@ -285,7 +284,9 @@ class DynamicRiskParity():
             wealth[i,:] = torch.sum( theta[i-1,:,:] * S[i,:,:], axis=1).clone()
             
             # concatenate t_i, and asset prices    
-            Y[i,...] = torch.cat(((i*self.dt)*ones, S[i,:,:]), axis=1).unsqueeze(axis=1)
+            Y[i,...] = torch.cat(((i*self.dt)*ones, 
+                                  wealth[i,:].reshape(-1,1),
+                                  S[i,:,:]), axis=1).unsqueeze(axis=1)
             
             # push through the neural-net to get new number of assets
             h[i+1,...], beta[i,:,:] = self.beta(h[i,...], Y[i,...])
@@ -594,14 +595,44 @@ class DynamicRiskParity():
         costs = costs.detach().numpy()
         V = V.detach().numpy()
         
+        def kde(x, bins):
+            h = np.std(x)*1.06*(len(x))**(-1/5)
+            
+            dx = x.reshape(1,-1)-bins.reshape(-1,1)
+            
+            f = np.sum(np.exp(-0.5*dx**2/h**2)/np.sqrt(2*np.pi*h**2), axis=1)/len(x)
+            
+            return f
+        
+        bins=np.linspace(-0.2, 0.2, 51)
         for i in range(self.T):
             
-            plt.subplot(2,self.T, i+1)
-            plt.hist(costs[i,:], density=True)
+            plt.subplot(3,self.T, i+1)
+            plt.hist(costs[i,:], bins=bins, density=True, alpha=0.5)
+            f = kde(costs[i,:], bins)
+            plt.plot(bins,f,linewidth=1,color='r')
+            
             plt.xlabel(r'$c_'+str(i) + '$', fontsize=16)
         
-            plt.subplot(2,self.T, i+1 + self.T)
-            plt.hist(V[i,:], density=True)
+            plt.subplot(3,self.T, i+1 + self.T)
+            c_p_V = costs[i,:]
+            if i < self.T-1:
+                c_p_V += V[i+1,:]
+                
+            plt.hist(c_p_V, bins=bins, density=True, alpha=0.5)
+            qtl = np.quantile(c_p_V, self.alpha)
+            plt.axvline(qtl,color='k',linestyle='--',linewidth=1)
+            f = kde(c_p_V, bins)
+            plt.plot(bins,f,linewidth=1,color='r')
+            plt.fill_between(bins[bins>=qtl], f[bins>=qtl], alpha=0.5, color='r')
+            
+                
+            plt.xlabel(r'$c_' + str(i) + '\;+\;V_'+str(i+1) + '$', fontsize=16)
+        
+            plt.subplot(3,self.T, i+1 + 2*self.T)
+            plt.hist(V[i,:], bins=bins, density=True, alpha=0.5)
+            f = kde(V[i,:], bins)
+            plt.plot(bins,f,linewidth=1,color='r')
             plt.xlabel(r'$V_'+str(i) + '$', fontsize=16)
             
         plt.tight_layout()
@@ -623,10 +654,14 @@ class DynamicRiskParity():
         
         plt.subplot(2,3,1)
         plt.plot(self.beta_loss)
+        plt.yscale('symlog')
+        plt.ylim(0.0001, 0.1)
         plt.title(r'$V_0-\sum \mathbb{E}\log \theta$')
         
         plt.subplot(2,3,2)
         plt.plot(self.VaR_CVaR_mean_loss)
+        plt.yscale('symlog')
+        plt.ylim(0.001, 0.1)
         plt.title(r'$S(VaR,CVaR)$')
         
         plt.subplot(2,3,3)
@@ -778,23 +813,23 @@ class DynamicRiskParity():
             # varbeta_0 = (beta_0[:,:,0] * S1_0[:,:,0] / self.X0).detach().numpy()
             varbeta_0 = beta_0[:,:,0].detach()
             im0 = ax0[0,j].contourf(S1_1[:,:,0].numpy(), S2_1[:,:,0].numpy(), varbeta_0, vmin=0, vmax=1)
-            ax0[0, j].set_title(r'$\varbeta_0^{0:d}$, $X_0={1:.2f}$'.format(0,x_1))
+            ax0[0, j].set_title(r'$\varbeta_0^{0:d}$, $X_0={1:.2f}$'.format(0,x_1), fontsize=20)
 
             # varbeta_0 = (beta_0[:,:,1] * S2_0[:,:,0] / self.X0).detach().numpy()
             varbeta_0 = beta_0[:,:,1].detach()
             im0 = ax0[1,j].contourf(S1_1[:,:,0].numpy(), S2_1[:,:,0].numpy(), varbeta_0, vmin=0, vmax=1)
-            ax0[1, j].set_title(r'$\varbeta_0^{0:d}$, $X_0={1:.2f}$'.format(1,x_1))            
+            ax0[1, j].set_title(r'$\varbeta_0^{0:d}$, $X_0={1:.2f}$'.format(1,x_1), fontsize=20)            
             
             
             # varbeta_1 = (beta_1[:,:,0] * S1_1[:,:,0] / self.X0).detach().numpy()
             varbeta_1 = beta_1[:,:,0].detach()
             im1 = ax1[0,j].contourf(S1_1[:,:,0].numpy(), S2_1[:,:,0].numpy(), varbeta_1, vmin=0, vmax=1)
-            ax1[0, j].set_title(r'$\varbeta_1^{0:d}$, $X_1={1:.2f}$'.format(0,x_1))
+            ax1[0, j].set_title(r'$\varbeta_1^{0:d}$, $X_1={1:.2f}$'.format(0,x_1), fontsize=20)
             
             # varbeta_1 = (beta_1[:,:,1] * S2_1[:,:,0] / self.X0).detach().numpy()
             varbeta_1 = beta_1[:,:,1].detach()
             im1 = ax1[1,j].contourf(S1_1[:,:,0].numpy(), S2_1[:,:,0].numpy(), varbeta_1, vmin=0, vmax=1)
-            ax1[1, j].set_title(r'$\varbeta_1^{0:d}$, $X_1={1:.2f}$'.format(1,x_1))     
+            ax1[1, j].set_title(r'$\varbeta_1^{0:d}$, $X_1={1:.2f}$'.format(1,x_1), fontsize=20)     
             
             if print_beta:
                 print(j,end="\n\n")
@@ -892,14 +927,16 @@ class DynamicRiskParity():
                 
                 ax = plt.subplot(1,self.n,k+1)
                 
-                plt.title(r'$\beta_{0:1d}^{1:1d}$'.format(j,k))
+                plt.title(r'$\beta_{0:1d}^{1:1d}$'.format(j,k), fontsize=20)
                 qtl = np.floor(np.quantile(beta[j,:,k], [0.1,0.9])*20)/20
                 im1=plt.scatter(S[j,:,0], S[j,:,1], 
                                 s=10, alpha=0.8, c=beta[j,:,k], 
                                 cmap='brg', vmin=0.3, vmax=0.7)
                 # plt.scatter(S[1,:,0], S[1,:,1], s=1, alpha=0.5, c=beta[1,:,0], vmin=qtl[0], vmax=qtl[1], cmap='jet')
-                plt.xlabel(r'$S_{0:1d}^1$'.format(j),fontsize=16)
-                plt.ylabel(r'$S_{0:1d}^2$'.format(j),fontsize=16)
+                plt.xlabel(r'$S_{0:1d}^1$'.format(j),fontsize=20)
+                plt.ylabel(r'$S_{0:1d}^2$'.format(j),fontsize=20)
+                plt.xticks(fontsize=16)
+                plt.yticks(fontsize=16)
                 plt.xlim(0.7, 1.4)
                 plt.ylim(0.8, 1.3)
                 

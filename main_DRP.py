@@ -6,27 +6,23 @@ Created on Fri Aug  5 15:00:58 2022
 """
 
 from Simulator_OU import Simulator_OU
-from DynamicRiskParity_v5 import DynamicRiskParity
+from DynamicRiskParity_v7 import DynamicRiskParity
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-import copy
-
 #%%
-print("add back in wealth into Y!!!")
-
 Simulator = Simulator_OU(n_assets=2, T=3)
 
-DRP = DynamicRiskParity(Simulator=Simulator, alpha=0.75, p=0.75)
+DRP = DynamicRiskParity(Simulator=Simulator, alpha=0.75, p=0.5)
 # DRP.B[0,0,0] = 0.5
 # DRP.B[0,0,1] = 0.2
 # DRP.B[1,0,0] = 0.2
 # DRP.B[1,0,1] = 0.1
 # for i in range(10):
 #     DRP.EstimateValueFunction(N_iter = 50)
-DRP.Train(n_iter=10_000, n_print=50, M_value_iter=5, M_policy_iter=1, batch_size=512)
+DRP.Train(n_iter=10_000, n_print=100, M_value_iter=1, M_policy_iter=1, batch_size=2048)
 
 #%% various alpha levels
 alpha = [0.7, 0.8, 0.9, 0.95]

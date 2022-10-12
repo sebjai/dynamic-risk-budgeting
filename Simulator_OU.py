@@ -6,8 +6,6 @@ Created on Thu Aug  4 14:49:15 2022
 """
 
 import numpy as np
-import pdb
-import matplotlib.pyplot as plt
 
 class  Simulator_OU():
     
@@ -16,9 +14,9 @@ class  Simulator_OU():
         self.n = n_assets
         self.T = T
         self.kappa = np.linspace(1, 2, self.n).reshape(1,-1)
-        self.sigma = np.linspace(0.3, 0.2, self.n).reshape(1,-1)
-        self.mu = np.linspace(0.075, 0.05, self.n).reshape(1,-1)
-        self.rho = 0.3
+        self.sigma = np.linspace(0.2, 0.3, self.n).reshape(1,-1)
+        self.mu = np.linspace(0.05, 0.08, self.n).reshape(1,-1)
+        self.rho = -0.3
         self.S0 = np.ones(self.n).reshape(1,-1)
         
         self.dt = dt
@@ -37,7 +35,7 @@ class  Simulator_OU():
             X[:, i+1, :] = X[:,i,:] * np.exp(-self.kappa*self.dt) + self.sigma * dW
             
         t = self.dt*np.linspace(1e-10, self.T, self.T+1).reshape(1,-1, 1)
-        g = self.mu.reshape(1,1,-1) * t -self.sigma.reshape(1,1,-1)**2*(1-np.exp(-2*self.kappa.reshape(1,1,-1)*t))/(4.0*self.kappa.reshape(1,1,-1))        
+        g = self.mu.reshape(1,1,-1) * t - self.sigma.reshape(1,1,-1)**2*(1-np.exp(-2*self.kappa.reshape(1,1,-1)*t))/(4.0*self.kappa.reshape(1,1,-1))        
         
         S = self.S0.reshape(1,1,-1) * np.exp( g + X)
         
