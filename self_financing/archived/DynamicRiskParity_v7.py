@@ -18,6 +18,10 @@ import matplotlib.pyplot as plt
 
 import copy
 
+import dill
+
+from datetime import datetime
+
 
 class Net(nn.Module):
     
@@ -94,7 +98,6 @@ class betaNet(nn.Module):
         self.g = nn.SiLU()
         self.softmax = nn.Softmax(dim=1)
         self.softplus = nn.Softplus()
-        self.nOut = nOut
         
     def forward(self, h, Y):
         
@@ -144,6 +147,9 @@ class DynamicRiskParity():
     
     def __init__(self, Simulator : Simulator_OU, X0=1, B = 0, alpha=0.8, p=0.5):
         
+        
+        self.ver = 7
+        
         # set the device to use
         if torch.cuda.device_count() > 0:
             self.device = torch.device('cuda:0')
@@ -153,14 +159,16 @@ class DynamicRiskParity():
         self.Simulator = Simulator
         self.X0 = X0        
         self.T = Simulator.T
-        self.n = Simulator.n
+        self.d = Simulator.n
         self.dt = Simulator.dt
         self.alpha = alpha
         self.p = p
         self.gamma = lambda u : self.p*(u>self.alpha)/(1-alpha) + (1-self.p)
+        # self.sigmoid = nn.Sigmoid()
+        # self.gamma = lambda u : self.p*self.sigmoid((u-self.alpha)*5)/(1-alpha) + (1-self.p)
         
         if B == 0:
-            self.B = torch.ones((self.T, 1, self.n))/(self.T*self.n)
+            self.B = torch.ones((self.T, 1, self.d))/(self.T*self.d)
         else:
             self.B = torch.tensor(B).float()
             
@@ -170,7 +178,7 @@ class DynamicRiskParity():
         # the percentage of wealth in each asset: 
         # states = past asset prices (encoded in a GRU), current time and wealth
         #
-        self.beta = betaNet(nIn=self.n+2,
+        self.beta = betaNet(nIn=self.d+2,
                             nOut=self.Simulator.n,
                             gru_hidden=self.Simulator.n,
                             gru_layers=5,
@@ -282,7 +290,7 @@ class DynamicRiskParity():
         S = torch.tensor(self.Simulator.Simulate(batch_size)).float().transpose(0,1).to(self.device)
         
         # number of each asset invested
-        beta = torch.zeros((self.T, batch_size, self.n)).to(self.device)
+        beta = torch.zeros((self.T, batch_size, self.d)).to(self.device)
         
         #
         # store the hidden states from all layers and each time
@@ -309,7 +317,7 @@ class DynamicRiskParity():
         h[1,...] , beta[0,:,:] = self.beta(h[0,...], Y[0,...])
     
         # convert to weights to number of shares
-        theta = torch.zeros((self.T, batch_size,  self.n)).to(self.device)
+        theta = torch.zeros((self.T, batch_size,  self.d)).to(self.device)
         theta[0,:,:] = beta[0,:,:].clone() * wealth[0,:].reshape(-1,1).clone() / S[0,:,:]
             
         for i in range(1, self.T):
@@ -334,6 +342,33 @@ class DynamicRiskParity():
         
         return costs, h, Y, beta, theta, S, wealth    
         
+    
+    def RunEpoch_const_beta(self, const_beta, batch_size = 256):
+        
+        # grab a simulation of the market prices
+        S = torch.tensor(self.Simulator.Simulate(batch_size)).float().transpose(0,1).to(self.device)
+        
+        # stores wealth process
+        wealth = torch.zeros((self.T+1, batch_size)).to(self.device)
+        wealth[0,:] = self.wealth_0(batch_size).reshape(-1)              
+        
+        # convert to weights to number of shares
+        theta = torch.zeros((self.T, batch_size,  self.d)).to(self.device)
+        theta[0,:,:] = const_beta.reshape(1,-1) * wealth[0,:].reshape(-1,1).clone() / S[0,:,:]
+            
+        for i in range(1, self.T):
+            
+            # new wealth at period end
+            wealth[i,:] = torch.sum( theta[i-1,:,:] * S[i,:,:], axis=1).clone()
+            
+            # rebalance assets holdings
+            theta[i,:,:] = const_beta.reshape(1,-1) * wealth[i,:].reshape(-1,1).clone() / S[i,:,:]  
+            
+        wealth[-1,:] = torch.sum( theta[-1,:,:] * S[-1,:,:], axis=1).clone()
+            
+        costs = -torch.diff(wealth, axis=0)         
+        
+        return costs, theta, S, wealth    
     
     def Update_ValueFunction(self, N_iter  = 100, batch_size = 256, n_print=100):
         
@@ -440,7 +475,7 @@ class DynamicRiskParity():
                 V[j,:] = self.risk_measure_target(h = h[j+1,...].transpose(0,1), 
                                                   Y=Y[j,...]).squeeze()
             
-            costs_plus_V_onestep_ahead  = (costs + V[1:,:]).detach()
+            costs_plus_V_onestep_ahead  = (costs + V[1:,:])
 
             # evalute the Gamma processes
             U = torch.zeros((self.T, batch_size)).to(self.device)
@@ -456,27 +491,30 @@ class DynamicRiskParity():
                 
             cumprod_Gamma = torch.cumprod(Gamma, axis=0)
             
-            return V, cumprod_Gamma
+            return V, Gamma, cumprod_Gamma
         
     def RiskContributions(self, batch_size=2048):
         
         costs, h, Y, beta, theta, S, X = self.__RunEpoch__(batch_size)
         
-        V, cumprod_Gamma = self.__Compute_V_Gamma__(costs.detach(), h.detach(), Y.detach())
+        V,  Gamma, cumprod_Gamma = self.__Compute_V_Gamma__(costs.detach(),
+                                                            h.detach(), 
+                                                            Y.detach())
         
         Delta_S = torch.diff(S, axis=0)
 
         # compute loss
-        RC = torch.zeros((self.T, self.n)).to(self.device)
-        RC_err = torch.zeros((self.T, self.n)).to(self.device)
-        for j in range(self.T):
+        RC = torch.zeros((self.T, self.d)).to(self.device)
+        RC_err = torch.zeros((self.T, self.d)).to(self.device)
+        for t in range(self.T):
             
-            for n in range(self.n):
+            for n in range(self.d):
             
-                Z = theta[j,:,n]  * (-Delta_S[j,:,n])  * cumprod_Gamma[j,:]
+                Z = theta[t,:,n]  * (-Delta_S[t,:,n])  * cumprod_Gamma[t,:]
+                # Z = theta[t,:,n]  * (-Delta_S[t,:,n])  * Gamma[t,:]
                 
-                RC[j,n] = torch.mean( Z )
-                RC_err[j,n] = torch.std( Z )/np.sqrt(batch_size)
+                RC[t,n] = torch.mean( Z )
+                RC_err[t,n] = torch.std( Z )/np.sqrt(batch_size)
 
         return RC, RC_err  
                 
@@ -487,7 +525,7 @@ class DynamicRiskParity():
             
             costs, h, Y, beta, theta, S, X = self.__RunEpoch__(batch_size)
 
-            V, cumprod_Gamma = self.__Compute_V_Gamma__(costs, h, Y)
+            V,  Gamma, cumprod_Gamma = self.__Compute_V_Gamma__(costs, h, Y)
             
             Delta_S = torch.diff(S, axis=0)
             
@@ -495,21 +533,19 @@ class DynamicRiskParity():
             gradV_0 = 0
             penalty = 0
             
-            for j in range(self.T):
+            for t in range(self.T):
                 
-                A = torch.sum( theta[j,:,:] * (-Delta_S[j,:,:]), axis=1 ) * cumprod_Gamma[j,:].detach()
-                # B = torch.sum( self.B[j,:,:] * torch.log(torch.abs(theta[j,:,:])), axis=1 )
-                B = torch.sum( self.B[j,:,:] * theta[j,:,:]/theta[j,:,:].detach(), axis=1 )
+                A = torch.sum( theta[t,:,:] * (-Delta_S[t,:,:]), axis=1 ) * cumprod_Gamma[t,:].detach()
+                B = torch.sum( self.B[t,:,:] * theta[t,:,:]/theta[t,:,:].detach(), axis=1 )
                 
                 gradV_0 += torch.mean(A, axis=0)
                 penalty += torch.mean(B, axis=0)
-                
-            # grad_loss = torch.sum(RC) - penalty
+            
+            RC, _ = self.RiskContributions(batch_size)
             
             grad_loss =  gradV_0 - self.eta*penalty 
             
             # deviation from B errors
-            RC, _ = self.RiskContributions(batch_size)
             # B_error = torch.sum((self.B.squeeze()-RC)**2)
             # grad_loss += 2*self.eta*B_error
             
@@ -541,7 +577,7 @@ class DynamicRiskParity():
             # RC, RC_err = self.RiskContributions(500)
             self.RC.append(RC.cpu().detach().numpy())  
                 
-    def Train(self, n_iter=10_000, n_print = 10, M_value_iter = 10, M_policy_iter=1, batch_size=256):
+    def Train(self, n_iter=10_000, n_print = 10, M_value_iter = 10, M_policy_iter=1, batch_size=256, name=""):
         
         # torch.autograd.set_detect_anomaly(False)
         
@@ -575,10 +611,14 @@ class DynamicRiskParity():
                 self.PlotPaths(500)
                 self.PlotHist()
                 
+                date_time = datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
+                dill.dump(self, open(name + '_v' + str(self.ver) + '_' + date_time + '.pkl','wb'))                    
+
+                
     def __Initialize_W_0__(self):
         
         
-        self.wealth_0.scale = 5
+        self.wealth_0.scale = 2
         
         # for i in range(10):
             
@@ -598,7 +638,7 @@ class DynamicRiskParity():
         #     # compute the value function at time zero
         #     h = torch.zeros((self.beta.gru.num_layers, 1, self.beta.gru.hidden_size))
         #     Y = torch.zeros((1, 1, self.Simulator.n+2))
-        #     S_0 = torch.tensor(self.Simulator.S0).float() * torch.ones(( 1, self.n))
+        #     S_0 = torch.tensor(self.Simulator.S0).float() * torch.ones(( 1, self.d))
             
         #     Y = torch.cat( (torch.zeros((1,1)), W_0.reshape(-1,1), S_0), axis=1).unsqueeze(axis=1)            
             
@@ -620,7 +660,7 @@ class DynamicRiskParity():
         
         costs, h, Y, beta, theta, S, X = self.__RunEpoch__(batch_size)
 
-        V, cumprod_Gamma = self.__Compute_V_Gamma__(costs, h, Y)
+        V,  Gamma,  cumprod_Gamma = self.__Compute_V_Gamma__(costs, h, Y)
         
         costs = costs.cpu().detach().numpy()
         V = V.cpu().detach().numpy()
@@ -723,19 +763,54 @@ class DynamicRiskParity():
         plt.tight_layout()
         plt.show()      
         
+        plt.figure(figsize=(10,3))
         idx = 1
-        for k in range(self.n):
+        for k in range(self.d):
             for j in range(self.T):
                
-                plt.subplot(self.n, self.T, idx)
-                plt.plot(RC[:,j,k],alpha=0.5)
-                plt.plot(self.MovingAverage(RC[:,j,k],10))
-                plt.ylabel(r'$RC_{' + str(j) + ','+str(k)+ '}$')
+                RC_target =self.MovingAverage(RC[:,j,k],1000)[-1]
+                target = self.B[j,0,k].cpu().numpy() *self.eta
+                RC_ma = (self.MovingAverage(RC[:,j,k],50) / RC_target) * target
+                
+                plt.subplot(self.d, self.T, idx)
+                plt.plot((RC[:,j,k] / RC_target)*target,alpha=0.5)
+                plt.plot(RC_ma)
+                
+                plt.ylim(0,self.B[0,0,0].cpu().numpy()*self.eta*2)
+                plt.ylabel(r'$RC_{' + str(j) + ','+str(k)+ '}$', fontsize=16)
                 plt.axhline(self.B[j,0,k].cpu()*self.eta, linestyle='--', color='k')
+                plt.yticks(ticks=[0,0.01,0.02])
+                
                 idx += 1
-        plt.suptitle(r'$RC$')
+        #plt.suptitle(r'$RC$')
         plt.tight_layout()
         plt.show()      
+        
+        plt.figure(figsize=(10,3))
+        
+        plt.subplot(1,3,1)
+        plt.plot(self.MovingAverage(self.VaR_CVaR_mean_loss,10))
+        plt.yscale('symlog')
+        plt.ylim(0.03, 0.3)
+        plt.title(r'$S(VaR,CVaR,\mu)$', fontsize=16)
+        # plt.xticks(ticks=[0,20_000,40_000], labels=['0','5000','10000'])
+        plt.xticks([])
+        
+        plt.subplot(1,3,2)
+        plt.plot(self.W_0)
+        plt.title(r'$W_0$', fontsize=16)
+        # plt.xticks(ticks=[0,50_000,100_000], labels=['0','5000','10000'])
+        plt.xticks([])
+        
+        plt.subplot(1,3,3) 
+        V_0_est = np.sum(np.sum(RC, axis=1),axis=1)
+        plt.plot(self.MovingAverage(V_0_est, 10), label=r'$\sum RC$', linewidth=1) 
+        plt.plot(self.V_0, label=r'$V_0$', linewidth=1)
+        plt.axhline(0.1, linestyle='--', color='k')
+        plt.ylim(0,0.5)
+        # plt.xticks(ticks=[0,5000,10000])
+        plt.xticks([])
+        plt.legend(fontsize=10)
                 
     # def PlotValueFunc(self):
         
@@ -822,13 +897,13 @@ class DynamicRiskParity():
 
     #     X_1 = np.linspace(0.95, 1.05, 3)
         
-    #     fig0, ax0 = plt.subplots(nrows=self.n, ncols=X_1.shape[0], sharex='all', sharey='all')
-    #     fig1, ax1 = plt.subplots(nrows=self.n, ncols=X_1.shape[0], sharex='all', sharey='all')        
+    #     fig0, ax0 = plt.subplots(nrows=self.d, ncols=X_1.shape[0], sharex='all', sharey='all')
+    #     fig1, ax1 = plt.subplots(nrows=self.d, ncols=X_1.shape[0], sharex='all', sharey='all')        
     #     for j, x_1 in enumerate(X_1):
             
     #         Y_1 = torch.cat(((1*self.dt)*ones, S1_1, S2_1), axis=2)
             
-    #         beta_0 = torch.zeros((S1_0.shape[0], S1_0.shape[0], self.n))
+    #         beta_0 = torch.zeros((S1_0.shape[0], S1_0.shape[0], self.d))
     #         beta_1 = beta_0.clone()
             
     #         for i in range(S1_0.shape[1]):
@@ -917,27 +992,27 @@ class DynamicRiskParity():
         # plt.title(r'$S_t$')
         # plt.show()
         
-        fig, ax = plt.subplots(nrows=self.n,ncols=2)
+        fig, ax = plt.subplots(nrows=self.d,ncols=2)
         
         # pdb.set_trace()
         
         qtl_S = np.quantile(S, [0.1,0.9], axis=1)
         qtl_beta = np.quantile(beta, [0.1,0.9], axis=1)
         
-        for j in range(self.n):
+        for j in range(self.d):
                 ax[j,0].set_ylabel(r'$S^{0:2d}$'.format(j+1))
-                ax[j,0].plot(S[:,:,j], alpha=0.1)
+                ax[j,0].plot(S[:,:100,j], alpha=0.1)
                 ax[j,0].plot(S[:,0,j], color='r', linewidth=1)
                 ax[j,0].plot(qtl_S[:,:,j].T, color='k', linewidth=1)
                 ax[j,0].set_ylim(0.7, 1.4)
-                ax[j,1].set_xticks([0,1,2])
+                ax[j,0].set_xticks([0,1,2,3,4])
                 
                 ax[j,1].set_ylabel(r'$\beta^{0:2d}$'.format(j+1))
-                ax[j,1].plot(beta[:,:,j], alpha=0.1)
+                ax[j,1].plot(beta[:,:100,j], alpha=0.1)
                 ax[j,1].plot(beta[:,0,j], color='r', linewidth=1)
                 ax[j,1].plot(qtl_beta[:,:,j].T, color='k', linewidth=1)
                 ax[j,1].set_ylim(0, 1)
-                ax[j,1].set_xticks([0,1,2])
+                ax[j,1].set_xticks([0,1,2,3,4])
                 
                 
             # ax[1].set_ylim(0,1)
@@ -950,24 +1025,56 @@ class DynamicRiskParity():
         plt.tight_layout()
         plt.show()
         
-        for j in range(1, self.T):
+        for j in range(self.T):
             
             fig = plt.figure(figsize=(12,6))
             
-            for k in range(self.n):
+            for k in range(self.d):
                 
-                ax = plt.subplot(1,self.n,k+1)
+                ax = plt.subplot(1,self.d,k+1)
                 
                 plt.title(r'$\beta_{0:1d}^{1:1d}$'.format(j,k+1), fontsize=20)
-                im1=plt.scatter(S[j,:,0], S[j,:,1], 
-                                s=10, alpha=0.8, c=beta[j,:,k], 
-                                cmap='brg', vmin=0.3, vmax=0.7)
+                if j ==0:
+                    s = 20
+                else:
+                    s = 5
+                
+                if j == 0:
+                    
+                    im1=plt.scatter(S[j,0,0], S[j,0,1], 
+                                    s=s, alpha=0.8, c=beta[j,0,k], 
+                                    cmap='brg', vmin=0.3, vmax=0.7)
+                    
+                    plt.text(S[j,0,0] * 1.01, S[j,0,0] * 1.01, str('{0:0.2f}'.format(beta[j,0,k])), fontsize=12)
+                    
+                if j > 0:
+                    
+                    im1=plt.scatter(S[j,:,0], S[j,:,1], 
+                                    s=s, alpha=0.8, c=beta[j,:,k], 
+                                    cmap='brg', vmin=0.3, vmax=0.7)
+                    
+                    plt.plot(S[:j+1,0,0],S[:j+1,0,1], linewidth=2, color='k')
+                    
+                    plt.scatter(S[:j+1,0,0],S[:j+1,0,1],
+                                s=50, 
+                                c ='k', vmin=0.3, vmax=0.7)    
+                    
+                    # plt.scatter(S[:j+1,0,0],S[:j+1,0,1],
+                    #             s=50, 
+                    #             c = beta[:j+1,0,k], vmin=0.3, vmax=0.7)                    
+                    
+                    # plt.scatter(S[j,0,0],S[j,0,1],
+                    #             s=50, 
+                    #             c = beta[j,0,k], 
+                    #             edgecolors='k', linewidth=2, vmin=0.3, vmax=0.7)
+                    
+                    
                 plt.xlabel(r'$S_{0:1d}^1$'.format(j),fontsize=20)
                 plt.ylabel(r'$S_{0:1d}^2$'.format(j),fontsize=20)
-                plt.xticks(fontsize=16)
-                plt.yticks(fontsize=16)
-                plt.xlim(0.7, 1.4)
-                plt.ylim(0.8, 1.3)
+                plt.xlim(0.7, 1.3)
+                plt.ylim(0.7, 1.3)
+                plt.xticks(ticks=[0.8,1,1.2], fontsize=16)
+                plt.yticks(ticks=[0.8,1,1.2], fontsize=16)
                 
             plt.tight_layout(pad=2)
             

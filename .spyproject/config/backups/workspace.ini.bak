@@ -4,7 +4,7 @@ save_data_on_exit = True
 save_history = True
 save_non_project_files = False
 project_type = 'empty-project-type'
-recent_files = ['main_DRP.py', 'Simulator_OU.py', 'DynamicRiskParity_v7.py']
+recent_files = ['theta_arbitrary\\v2.0\\DynamicRiskParity.py', 'theta_arbitrary\\v2.0\\main_DRP.py']
 
 [main]
 version = 0.2.0
