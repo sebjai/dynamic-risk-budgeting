@@ -28,7 +28,7 @@ DRP.eta = 0.1
 DRP.Train(n_iter=10_000, 
           n_print=100,   
           M_value_iter=5, 
-          M_policy_iter=1, 
-          batch_size=512,
-          name="n2_T2_p75")
-
+          M_F_iter=5,
+          M_policy_iter=1,  
+          batch_size=4096,
+          name="n5_T3_p75")

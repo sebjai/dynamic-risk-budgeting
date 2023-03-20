@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Oct 13 8:07:00 2022
+Created on Fri Mar 17 17:02:13 2023
+
 
 @author: jaimunga
 """
@@ -9,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from Simulator_OU import Simulator_OU
+from heston import heston
 from tqdm import tqdm
 
 import pdb
@@ -121,9 +122,9 @@ class ThetaNet(nn.Module):
         
         return h_out, theta
         
-class DynamicRiskParity():
+class dynamic_risk_budget():
     
-    def __init__(self, Simulator : Simulator_OU, X0=1, B = 0, alpha=0.8, p=0.5):
+    def __init__(self, env : heston, X0=1, B = 0, alpha=0.8, p=0.5):
         
         # set the device to use
         if torch.cuda.device_count() > 0:
@@ -131,11 +132,11 @@ class DynamicRiskParity():
         else:
             self.device = torch.device('cpu')
             
-        self.env = Simulator
+        self.env = env
         self.X0 = X0        
-        self.T = Simulator.T
-        self.d = Simulator.n
-        self.dt = Simulator.dt
+        self.T = env.T
+        self.d = env.n
+        self.dt = env.dt
         self.alpha = alpha
         self.p = p
         self.gamma = lambda u : self.p*(u>self.alpha)/(1-alpha) + (1-self.p)
@@ -169,10 +170,10 @@ class DynamicRiskParity():
                 self.theta[-1].gru = self.theta[0].gru
             
             self.theta_optimizer.append(optim.AdamW(self.theta[t].parameters(),
-                                                    lr = 0.001))
+                                                     lr=0.001))
             
             self.theta_scheduler.append(optim.lr_scheduler.StepLR(self.theta_optimizer[t],
-                                                             step_size=10,
+                                                             step_size=100,
                                                              gamma=0.99))
         
         self.__initialize_CVaR_VaR_Mean_Net__(self.device)
@@ -185,7 +186,6 @@ class DynamicRiskParity():
         self.eta = 0.1 # the Lagrange multiplier factor        
         
         self.RC = []
-        self.RC_err = []
         self.V = []
         
     def __initialize_CVaR_VaR_Mean_Net__(self, device='cpu'):
@@ -199,74 +199,53 @@ class DynamicRiskParity():
         gru_total_hidden = self.theta[0].gru.num_layers*self.theta[0].gru.hidden_size
         n_in = gru_total_hidden+2+self.env.n
         
-        def get_opt_sched(net):
-            opt = optim.AdamW(net.parameters(), lr=0.001)
-            sched = optim.lr_scheduler.StepLR(opt,
-                                              step_size=10,
-                                              gamma=0.99)
-            return opt, sched
-        
-        self.F = []
-        self.mu = []
-        self.psi = []
-        self.chi = []
-        
-        self.F_optimizer = []
-        self.F_scheduler = []
-        self.mu_optimizer = []
-        self.mu_scheduler = []
-        self.psi_optimizer = []
-        self.psi_scheduler = []
-        self.chi_optimizer = []
-        self.chi_scheduler = []
-        
-        for t in range(self.T):
-            
-            # for conditional cdf of c_t + V_{t+1}
-            self.F.append(Net(n_in=n_in+1, n_out=1, nNodes=16, nLayers=3, out_activation='sigmoid', device=self.device))
-            o, s = get_opt_sched(self.F[-1])
-            self.F_optimizer.append(o)
-            self.F_scheduler.append(s)
-            
-            # for conditional mean
-            self.mu.append(Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, device=self.device))
-            o, s = get_opt_sched(self.mu[-1])
-            self.mu_optimizer.append(o)
-            self.mu_scheduler.append(s)
-            
-            # for conditional VaR
-            self.psi.append(Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, device=self.device))
-            o, s = get_opt_sched(self.psi[-1])
-            self.psi_optimizer.append(o)
-            self.psi_scheduler.append(s)
-            
-            # for increment from conditional VaR to conditional CVaR
-            # i.e., CVaR = chi + psi
-            self.chi.append(Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, out_activation='softplus', device=self.device))
-            o, s = get_opt_sched(self.chi[-1])
-            self.chi_optimizer.append(o)
-            self.chi_scheduler.append(s)
-        
+        # for conditional cdf of c_t + V_{t+1}
+        self.F = Net(n_in=n_in+1, n_out=1, nNodes=16, nLayers=3, out_activation='sigmoid', device=self.device)
+        self.F_optimizer = optim.AdamW(self.F.parameters(), lr=0.001)
+        self.F_scheduler = optim.lr_scheduler.StepLR(self.F_optimizer,
+                                                         step_size=100,
+                                                         gamma=0.99)
+        # for conditional mean
+        self.mu = Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, device=self.device)
         self.mu_target = copy.deepcopy(self.mu)
+        self.mu_optimizer = optim.AdamW(self.mu.parameters(), lr=0.001)
+        self.mu_scheduler = optim.lr_scheduler.StepLR(self.mu_optimizer,
+                                                         step_size=100,
+                                                         gamma=0.99)        
+        # for conditional VaR
+        self.psi = Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, device=self.device)
         self.psi_target = copy.deepcopy(self.psi)
+        self.psi_optimizer = optim.AdamW(self.psi.parameters(), lr=0.001)
+        self.psi_scheduler = optim.lr_scheduler.StepLR(self.psi_optimizer,
+                                                         step_size=100,
+                                                         gamma=0.99)        
+        
+        # for increment from conditional VaR to conditional CVaR
+        # i.e., CVaR = chi + psi
+        self.chi = Net(n_in=n_in, n_out=1, nNodes=32, nLayers=5, out_activation='softplus', device=self.device)
+        self.chi_optimizer = optim.AdamW(self.chi.parameters(), lr=0.001)
         self.chi_target = copy.deepcopy(self.chi)
+        self.chi_scheduler = optim.lr_scheduler.StepLR(self.chi_optimizer,
+                                                         step_size=100,
+                                                         gamma=0.99)          
         
-        self.VaR = lambda t, h, Y : self.psi[t](h, Y)
-        self.CVaR = lambda t, h, Y : self.psi[t](h, Y) + self.chi[t](h, Y)
+        self.VaR = lambda h, Y : self.psi(h, Y)
+        self.CVaR = lambda h, Y : self.psi(h, Y) + self.chi(h, Y)
         
-        self.risk_measure = lambda t, h, Y :  (self.p * self.CVaR(t, h, Y)
-                                               + (1.0-self.p)* self.mu[t](h, Y))
+        self.risk_measure = lambda h, Y :  (self.p * self.CVaR(h, Y) 
+                                            + (1.0-self.p)* self.mu(h, Y))
         
-        self.VaR_target = lambda t, h, Y : self.psi_target[t](h, Y)
-        self.CVaR_target = lambda t, h, Y : self.psi_target[t](h, Y) + self.chi_target[t](h, Y)
-        self.risk_measure_target = lambda t, h, Y :  (self.p * self.CVaR_target(t, h, Y) 
-                                                      + (1.0-self.p)* self.mu_target[t](h, Y))       
+        self.VaR_target = lambda h, Y : self.psi_target(h, Y)
+        self.CVaR_target = lambda h, Y : self.psi_target(h, Y) + self.chi_target(h, Y)
+        self.risk_measure_target = lambda h, Y :  (self.p * self.CVaR_target(h, Y) 
+                                                   + (1.0-self.p)* self.mu_target(h, Y))       
         
         
     def __run_epoch__(self, batch_size = 256):
         
         # grab a simulation of the market prices
-        X = torch.tensor(self.env.Simulate(batch_size)).float().transpose(0,1).to(self.device)
+        X, _ = self.env.simulate(batch_size)
+        X = torch.tensor(X).float().transpose(0,1).to(self.device)
         
         #
         # store the hidden states from all layers and each time
@@ -299,8 +278,6 @@ class DynamicRiskParity():
         beta[0,:,:] = var_theta[0,:,:].clone() * X[0,...] / wealth[0,:].unsqueeze(axis=1).clone()
         
         w = torch.zeros((self.T, batch_size)).to(self.device)
-        
-        zeros = torch.zeros(batch_size,1).to(self.device)
 
         for t in range(1, self.T):
             
@@ -309,7 +286,7 @@ class DynamicRiskParity():
             
             # concatenate t_i, and asset prices    
             Y[t,...] = torch.cat(((t*self.dt)*ones, 
-                                  wealth[t-1,:].reshape(-1,1).detach(),
+                                  torch.zeros(batch_size,1).to(self.device), #wealth[t,:].reshape(-1,1).detach(),
                                   X[t,:,:]), axis=1).unsqueeze(axis=1)
             
             # push through the neural-net to get new number of assets
@@ -318,7 +295,6 @@ class DynamicRiskParity():
             
             w[t-1,:] = torch.sum(theta[t-1,:,:].detach() * X[t,:,:], axis=1) \
                 / torch.sum(theta[t,:,:].detach() * X[t,:,:], axis=1) 
-            # w[t-1,:] = 1.0
             
             var_theta[t,:,:] = theta[t,:,:].clone() * torch.prod(w[:t,:], axis=0).reshape(-1,1)
             
@@ -332,7 +308,7 @@ class DynamicRiskParity():
     
     def __V_Score__(self, VaR, CVaR, mu, X):
         
-        C = 2
+        C = 1
         xmax = torch.max(torch.abs(X))
         if xmax > C:
             C = 2*xmax
@@ -348,57 +324,58 @@ class DynamicRiskParity():
         
         return score
     
-    def __update_valuefunction__(self, N_iter  = 100, batch_size = 256, n_print=100):
+    def __update_risktogo__(self, N_iter  = 100, batch_size = 256, n_print=100):
         
         for j in range(N_iter):
-            
-            for t in range(self.T-1, -1, -1):
+        
+            for t in range(self.T):
+                
                 
                 costs, h, Y, beta, theta, var_theta, w, X, wealth = self.__run_epoch__(batch_size)
-                
-                self.psi_optimizer[t].zero_grad()
-                self.chi_optimizer[t].zero_grad()
-                self.mu_optimizer[t].zero_grad()
                 
                 dX = -torch.diff(X, axis=0)
                 theta = theta.detach()
                 h = h.detach()
                 Y = Y.detach()
+                
 
                 # A = theta_t' dX_t + w_t V_{t+1}
                 A = torch.sum(theta[t,:,:] * dX[t,:,:], axis=1).reshape(-1,1)
                 
                 if t < self.T-1:
                     A += w[t,:].reshape(-1,1) \
-                        * self.risk_measure_target(t+1,
-                                                   h[t+1,...].transpose(0,1),
+                        * self.risk_measure_target(h[t+1,...].transpose(0,1),
                                                    Y[t+1,...])
                 
-                loss = self.__V_Score__(self.VaR(t,
-                                                 h[t,...].transpose(0,1),
-                                                 Y[t,...]),
-                                       self.CVaR(t,
-                                                 h[t,...].transpose(0,1),
-                                                 Y[t,...]),
-                                       self.mu[t](h[t,...].transpose(0,1),
+                self.psi_optimizer.zero_grad()
+                self.chi_optimizer.zero_grad()
+                self.mu_optimizer.zero_grad()
+
+                loss = self.__V_Score__(self.VaR(h[t,...].transpose(0,1),
                                                   Y[t,...]),
+                                       self.CVaR(h[t,...].transpose(0,1),
+                                                 Y[t,...]),
+                                       self.mu(h[t,...].transpose(0,1),
+                                               Y[t,...]),
                                        A.detach())
 
                 loss.backward()
                 
-                self.psi_optimizer[t].step()
-                self.chi_optimizer[t].step()
-                self.mu_optimizer[t].step()
-                
-                self.psi_scheduler[t].step()
-                self.chi_scheduler[t].step()
-                self.mu_scheduler[t].step()            
+                self.psi_optimizer.step()
+                self.chi_optimizer.step()
+                self.mu_optimizer.step()
+            
+            self.psi_scheduler.step()
+            self.chi_scheduler.step()
+            self.mu_scheduler.step()            
+            
+            self.VaR_CVaR_mean_loss.append(loss.item())
             
         self.chi_target = copy.deepcopy(self.chi)
         self.psi_target = copy.deepcopy(self.psi)
         self.mu_target = copy.deepcopy(self.mu)
         
-    def __F_Score__(self, t, h, Y, X):
+    def __F_Score__(self, h, Y, X):
         
         max_z = 5
         
@@ -410,7 +387,7 @@ class DynamicRiskParity():
                           z), 
                          axis=3)
         
-        F = self.F[t](h.unsqueeze(axis=0).repeat(N,1,1,1), Z)
+        F = self.F(h.unsqueeze(axis=0).repeat(N,1,1,1), Z)
         
         score = torch.mean( torch.sum((F-1.0*(z[...,0]>=X.unsqueeze(axis=0).repeat(N,1,1)))**2*dz, 
                                       axis=0) )
@@ -425,37 +402,36 @@ class DynamicRiskParity():
     def __update_F__(self, N_iter  = 100, batch_size = 256, n_print=100):
         
         for j in range(N_iter):
-            
+        
             costs, h, Y, beta, theta, var_theta, w, X, wealth = self.__run_epoch__(batch_size)
             
-            for t in range(self.T-1, -1, -1):
+            dX = -torch.diff(X, axis=0)
+            theta = theta.detach()
+            h = h.detach()
+            Y = Y.detach()
+            
+            self.F_optimizer.zero_grad()
+            
+            loss = 0.0
+            
+            for t in range(0, self.T):
                 
-                
-                
-                dX = -torch.diff(X, axis=0)
-                theta = theta.detach()
-                h = h.detach()
-                Y = Y.detach()
-                
-                self.F_optimizer[t].zero_grad()
-                
+
                 A = torch.sum( theta[t,:,:] * dX[t,:,:], axis=1).reshape(-1,1)
                         
                 if t < self.T-1:
                     A += w[t,:].reshape(-1,1)*\
-                        self.risk_measure_target(t+1,
-                                                 h[t+1,...].transpose(0,1),
+                        self.risk_measure_target(h[t+1,...].transpose(0,1),
                                                  Y[t+1,...])
                 
-                loss = self.__F_Score__(t,
-                                        h[t,...].transpose(0,1),
-                                        Y[t,...],
-                                        A.detach())                
+                loss += self.__F_Score__(h[t,...].transpose(0,1),
+                                         Y[t,...],
+                                         A.detach())                
                 
-                loss.backward()
-                
-                self.F_optimizer[t].step()
-                self.F_scheduler[t].step()
+            loss.backward()
+            
+            self.F_optimizer.step()
+            self.F_scheduler.step()
             
     def __get_v_gamma__(self, theta, dX, w, h, Y):
         
@@ -464,22 +440,21 @@ class DynamicRiskParity():
             # compute the value function at points in time
             V = torch.zeros((self.T+1, batch_size)).to(self.device)
             for t in range(self.T):
-                V[t,:] = self.risk_measure_target(t,
-                                                  h=h[t,...].transpose(0,1), 
+                V[t,:] = self.risk_measure_target(h=h[t,...].transpose(0,1), 
                                                   Y=Y[t,...]).squeeze()
             
             U = torch.zeros((self.T, batch_size)).to(self.device)
             
             for t in range(self.T):
                 
-                A = torch.sum( theta[t,:,:] * dX[t,:,:], axis=1).reshape(-1,1) \
-                    + w[t,:].reshape(-1,1) * V[t+1,:].reshape(-1,1)
+                A = torch.sum( theta[t,:,:] * dX[t,:,:], axis=1).reshape(-1,1)
+                A += w[t,:].reshape(-1,1) * V[t+1,:].reshape(-1,1)
                 
                 Z = torch.concat((Y[t,...],
                                   A.unsqueeze(axis=2)),
                                  axis=2)
                 
-                U[t,:] = self.F[t](h[t,...].transpose(0,1), Z)[:,0]
+                U[t,:] = self.F(h[t,...].transpose(0,1), Z)[:,0]
                 
             Gamma = self.gamma(U)
                 
@@ -497,8 +472,8 @@ class DynamicRiskParity():
         V,  Gamma = self.__get_v_gamma__(theta,
                                          dX,
                                          w,
-                                         h.detach(),
-                                         Y.detach()) 
+                                         h,
+                                         Y) 
         
         Gamma = Gamma.detach()
         V = V.detach()
@@ -520,6 +495,7 @@ class DynamicRiskParity():
                 
         Z, theta_grad, V = self.__get_gateaux_terms__(batch_size)
         
+        #Z /= V[:-1,:].reshape(self.T, batch_size,1)
         Z /= self.eta
         
         RC = torch.mean(Z, axis=1)
@@ -535,47 +511,66 @@ class DynamicRiskParity():
         
         for k in range(N_iter):
             
-            for t in range(self.T-1, -1, -1):
+            t_rnd = np.random.permutation(np.arange(self.T))
+            for t in t_rnd:
                 
                 i_rnd = np.random.permutation(np.arange(self.d))
-            
-                loss = 0
-                
-                self.theta_optimizer[t].zero_grad()
                 
                 for i in i_rnd:
                     
                     Z, theta_grad, V = self.__get_gateaux_terms__(batch_size)
                     
-                    loss += torch.mean(Z[t,:,i]) \
+                    self.theta_optimizer[t].zero_grad()
+                    
+                    loss = torch.mean(Z[t,:,i]) \
                         - self.eta*torch.mean( self.B[t,:,i] * torch.log(theta_grad[t,:,i]) )
         
-                loss.backward()
-    
-                self.theta_optimizer[t].step()
-                self.theta_scheduler[t].step()
-            
-        self.V.append(torch.mean(V, axis=1).detach().cpu().numpy())
+                    loss.backward()
         
-        RC, RC_err = self.RiskContributions(500)
-        self.RC.append(RC.cpu().detach().numpy())  
-        self.RC_err.append(RC_err.cpu().detach().numpy())  
-                
-    def Train(self, n_iter=10_000, n_print = 10, M_value_iter = 10, M_F_iter=5, M_policy_iter=1, batch_size=256, name=""):
+                    self.theta_optimizer[t].step()
+                    self.theta_scheduler[t].step()
+            
+            
+            self.V.append(torch.mean(V, axis=1).detach().cpu().numpy())
+            
+            RC, RC_err = self.RiskContributions(500)
+            self.RC.append(RC.cpu().detach().numpy())  
+            
+    def print_state(self, n_iter, M_value_iter, M_F_iter, M_policy_iter, batch_size):
+        
+        print('T : ' , self.T)
+        print('d : ', self.d)
+        print('n_iter : ', n_iter)
+        print('M_value_iter : ', M_value_iter)
+        print('M_F_iter : ', M_F_iter)
+        print('M_policy_iter : ', M_policy_iter)
+        print('batch_size : ', batch_size)
+        
+        
+            
+    def train(self, 
+              n_iter=10_000, 
+              n_print = 10, 
+              M_value_iter = 10, 
+              M_F_iter=10, 
+              M_policy_iter=1, 
+              batch_size=256, name=""):
+        
+        self.print_state(n_iter, M_value_iter, M_F_iter, M_policy_iter, batch_size)
         
         print("training value function on initialization...")
-        self.__update_valuefunction__(N_iter= 10, n_print=500, batch_size=batch_size)
+        self.__update_risktogo__(N_iter= 10, n_print=500, batch_size=batch_size)
         print("training F on initialization...")
         self.__update_F__(N_iter= 10, n_print= 500, batch_size=batch_size)
         
         print("main training...")
-        self.PlotPaths(500)
+        self.plot_paths(500)
 
         count = 0
         for i in tqdm(range(n_iter)):
             
             # this updates mu, psi, chi
-            self.__update_valuefunction__(N_iter=M_value_iter, n_print=500, batch_size=batch_size)
+            self.__update_risktogo__(N_iter=M_value_iter, n_print=500, batch_size=batch_size)
             
             # this udpates F
             self.__update_F__(N_iter=M_F_iter, n_print=500, batch_size=batch_size)
@@ -587,14 +582,14 @@ class DynamicRiskParity():
             
             if np.mod(count, n_print)==0:
                 
-                self.PlotSummary()
-                self.PlotPaths(500)
-                self.PlotHist()
+                self.plot_summary()
+                self.plot_paths(500)
+                self.plot_hist()
                 
                 date_time = datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
                 dill.dump(self, open(name + '_' + date_time + '.pkl','wb'))   
                 
-    def PlotHist(self, batch_size = 10_000):
+    def plot_hist(self, batch_size = 10_000):
         
         costs, h, Y, beta, theta, var_theta, w, X, wealth = self.__run_epoch__(batch_size)
         
@@ -617,11 +612,11 @@ class DynamicRiskParity():
             
             return f
         
-        bins=np.linspace(-0.5, 0.5, 51)
-        kde_bins = np.linspace(-0.5, 0.5, 501)
+        bins=np.linspace(-0.2, 0.2, 51)
+        kde_bins = np.linspace(-0.2, 0.2, 501)
         
-        V_bins=np.linspace(0, 0.25, 51)
-        V_kde_bins = np.linspace(0, 0.25, 501)
+        V_bins=np.linspace(0.05, 0.15, 51)
+        V_kde_bins = np.linspace(0.05, 0.15, 501)
         for i in range(self.T):
             
             plt.subplot(3,self.T, i+1)
@@ -647,9 +642,12 @@ class DynamicRiskParity():
             plt.xlabel(r'$c_' + str(i) + '\;+\;V_'+str(i+1) + '$', fontsize=16)
         
             plt.subplot(3,self.T, i+1 + 2*self.T)
-            plt.hist(V[i,:], bins=V_bins, density=True, alpha=0.5)
-            f = kde(V[i,:], V_kde_bins)
-            plt.plot(V_kde_bins,f,linewidth=1,color='r')
+            if i > 0:
+                plt.hist(V[i,:], bins=V_bins, density=True, alpha=0.5)
+                f = kde(V[i,:], V_kde_bins)
+                plt.plot(V_kde_bins,f,linewidth=1,color='r')
+            else:
+                plt.axvline(V[0,0],linewidth=1,color='r')
             plt.xlabel(r'$V_'+str(i) + '$', fontsize=16)
             
         plt.tight_layout()
@@ -658,32 +656,28 @@ class DynamicRiskParity():
         
         fig, ax = plt.subplots(nrows=self.T,ncols=self.d, figsize=(8,8))
         
-        for t in range(self.T):
+        if self.T > 1:
+            for t in range(self.T):
+                
+                for i in range(self.d):
+                    
+                    ax[t,i].hist(theta[t,:,i].detach().cpu().numpy())
+                    
+        else:
             
             for i in range(self.d):
                 
-                ax[t,i].hist(theta[t,:,i].detach().cpu().numpy())
+                ax[i].hist(theta[0,:,i].detach().cpu().numpy())
                 
         plt.tight_layout()
         plt.show()
-        
-        
-        zeta = beta.cpu().detach().numpy()
-        for t in range(self.T):
-            plt.subplot(1,self.T,t+1)
-            plt.title(r'$\beta_{' + str(t) +'}$')
-            for i in range(self.d):
-                plt.hist(zeta[t,:,i], alpha=0.6, bins=np.linspace(0,1,51), density=True)
-                if t > 0:
-                    plt.axvline(np.mean(zeta[t-1,:,i]),linestyle='--', color='k')
-        plt.tight_layout()
-        plt.show()
             
-    def MovingAverage(self,x, n):
+    def moving_average(self,x, n):
         
         y = np.zeros(len(x))
+        y[0] = np.nan
         
-        for i in range(len(x)):
+        for i in range(1,len(x)):
             if i < n:
                 y[i] = np.mean(x[:i])
             else:
@@ -691,70 +685,68 @@ class DynamicRiskParity():
                 
         return y
         
-    def PlotSummary(self):
+    def plot_summary(self):
+
+        RC = np.array(self.RC)
+        RC_flat = RC.reshape(len(self.RC),-1)
+
         
         fig = plt.figure(figsize=(10,4))
         
-        plt.subplot(1,3,1)
-        RC = np.array(self.RC)
-        RC_flat = RC.reshape(len(self.RC),-1)
-        for i in range(RC_flat.shape[1]):
-            plt.plot(self.MovingAverage(RC_flat[:,i],100))
-        plt.ylabel('RC')
         
-        
-        plt.subplot(1,3,2)
+        plt.subplot(1,2,1)
         for t in range(self.T):
-            plt.plot(self.MovingAverage(np.sum(RC[:,t,:], axis=1),100), 
-                     label=r'$\sum \frac{RC_{' + str(t) + ',i}}{V_{' + str(t) + ',i}}$', linewidth=1) 
+            plt.plot(self.moving_average(np.sum(RC[:,t,:], axis=1), 100), 
+                     label=r'$\frac{1}{\eta}\sum RC_{' + str(t) + ',i}$', linewidth=1) 
             
         plt.axhline(1.0, linestyle='--', color='k')
-        plt.ylim(0,2)
-        plt.legend(fontsize=12)
+        plt.ylim(0.5, 2)
+        plt.legend(fontsize=12,loc='upper right')
+        plt.yticks(fontsize=14)
+        plt.xticks(fontsize=14)
 
-        plt.subplot(1,3,3)
+        plt.subplot(1,2,2)
         V = np.array(self.V)
         for t in range(self.T):
-            plt.plot(self.MovingAverage(V[:,t],10), label=r'$V_{'+str(t) + '}$', linewidth=1)
-        plt.axhline(self.eta, linestyle='--', color='k')
-        plt.ylim(0,2*self.eta)
+            plt.plot(self.moving_average(V[:,t],5), label=r'$V_{'+str(t) + '}$', linewidth=1)
+        plt.axhline(0.99*self.eta, linestyle='--', color='k')
+        plt.ylim(0.5*self.eta,2*self.eta)
         plt.legend(fontsize=12)
+        plt.yticks(fontsize=14)
+        plt.xticks(fontsize=14)
         
-        plt.tight_layout()
+        plt.tight_layout(pad=1.2)
+        
+        plt.savefig('sumRC_V.pdf', format='pdf')
         plt.show()      
         
-        plt.figure(figsize=(10,4))
+        plt.figure(figsize=(8,4))
         idx = 1
         
         for k in range(self.d):
             for j in range(self.T):
         
-                # RC_target =self.MovingAverage(RC[:,j,k],100)[-1]
-                # target = self.B[j,0,k].cpu().numpy() *self.eta
-                # RC_ma = (self.MovingAverage(RC[:,j,k],50) / RC_target) * target
-                
-                # plt.subplot(self.d, self.T, idx)
-                # plt.plot((RC[:,j,k] / RC_target)*target,alpha=0.5)
-                # plt.plot(RC_ma)
-                
-                RC_ma = (self.MovingAverage(RC[:,j,k],50)) 
+                RC_ma = (self.moving_average(RC[:,j,k],50)) 
                 
                 plt.subplot(self.d, self.T, idx)
                 plt.plot(RC[:,j,k],alpha=0.5)
                 plt.plot(RC_ma)                
                 
-                plt.ylim(0, 2*self.B[j,0,k].cpu())
+                plt.ylim(0, 1)
                 plt.ylabel(r'$RC_{' + str(j) + ','+str(k)+ '}$')
                 # plt.axhline(self.B[j,0,k].cpu()*self.eta/torch.sum(self.B[j,0,:]).cpu(), linestyle='--', color='k')
                 plt.axhline(self.B[j,0,k].cpu(), linestyle='--', color='k')
+                plt.xticks(fontsize=14)
+                plt.yticks(fontsize=14)
                 idx += 1
                 
         plt.suptitle(r'$RC$')
         plt.tight_layout()
+        plt.savefig('RC.pdf', format='pdf')
         plt.show()      
                 
        
-    def PlotPaths(self, batch_size=1, title=None):
+    def plot_paths(self, batch_size=1, title=None):
         
         costs, h, Y, beta, theta, var_theta, w, S, wealth = self.__run_epoch__(batch_size)
         
@@ -766,25 +758,27 @@ class DynamicRiskParity():
         wealth = wealth.cpu().detach().numpy()
         
         
-        fig, ax = plt.subplots(nrows=self.d,ncols=2)
+        fig, ax = plt.subplots(nrows=self.d,ncols=1, figsize=(3.2,5.6))
         
         qtl_S = np.quantile(S, [0.1,0.9], axis=1)
         qtl_beta = np.quantile(beta, [0.1,0.9], axis=1)
         
         for j in range(self.d):
-                ax[j,0].set_ylabel(r'$S^{0:2d}$'.format(j+1))
-                ax[j,0].plot(S[:,:,j], alpha=0.1)
-                ax[j,0].plot(S[:,0,j], color='r', linewidth=1)
-                ax[j,0].plot(qtl_S[:,:,j].T, color='k', linewidth=1)
-                ax[j,0].set_ylim(0.7, 1.4)
-                ax[j,1].set_xticks([0,1,2])
+                # ax[j,0].set_ylabel(r'$S^{0:2d}$'.format(j+1))
+                # ax[j,0].plot(S[:,:,j], alpha=0.1)
+                # ax[j,0].plot(S[:,0,j], color='r', linewidth=1)
+                # ax[j,0].plot(qtl_S[:,:,j].T, color='k', linewidth=1)
+                # ax[j,0].set_ylim(0.7, 1.4)
+                # ax[j,1].set_xticks([0,1,2])
                 
-                ax[j,1].set_ylabel(r'$\beta^{0:2d}$'.format(j+1))
-                ax[j,1].plot(beta[:,:,j], alpha=0.1)
-                ax[j,1].plot(beta[:,0,j], color='r', linewidth=1)
-                ax[j,1].plot(qtl_beta[:,:,j].T, color='k', linewidth=1)
-                ax[j,1].set_ylim(0, 1)
-                ax[j,1].set_xticks([0,1,2])
+                ax[j].set_ylabel(r'$\beta^{0:2d}$'.format(j+1))
+                ax[j].plot(beta[:,:,j], alpha=0.1)
+                ax[j].plot(beta[:,0,j], color='r', linewidth=1)
+                ax[j].plot(qtl_beta[:,:,j].T, color='k', linewidth=1)
+                ax[j].set_ylim(0, 2.0/self.d)
+                ax[j].set_xticks(np.arange(self.T))
+                plt.xticks(fontsize=14)
+                plt.yticks(fontsize=14)
                 
                 
         if title is not None:
@@ -798,7 +792,7 @@ class DynamicRiskParity():
         
         for j in range(1, self.T):
             
-            fig = plt.figure(figsize=(12,6))
+            fig = plt.figure(figsize=(16,6.4))
             
             for k in range(self.d):
                 
@@ -806,26 +800,29 @@ class DynamicRiskParity():
                 
                 plt.title(r'$\beta_{0:1d}^{1:1d}$'.format(j,k+1), fontsize=20)
                 im1=plt.scatter(S[j,:,0], S[j,:,1], 
-                                s=10, alpha=0.8, c=beta[j,:,k], 
-                                cmap='brg', vmin=0.3, vmax=0.7)
+                                s=10, alpha=0.6, c=beta[j,:,k], 
+                                cmap='brg', vmin=0, vmax=2.0/self.d)
                 plt.scatter(S[j,0,0],S[j,0,1],
-                            s=50, 
+                            s=100, 
                             c = beta[j,0,k], 
                             facecolors=None,
                             edgecolors='k')
                 plt.xlabel(r'$S_{0:1d}^1$'.format(j),fontsize=20)
                 plt.ylabel(r'$S_{0:1d}^2$'.format(j),fontsize=20)
-                plt.xticks(fontsize=16)
-                plt.yticks(fontsize=16)
-                plt.xlim(0.7, 1.4)
-                plt.ylim(0.8, 1.3)
+                plt.xticks(np.linspace(0.8,1.2,5), fontsize=14)
+                plt.yticks(np.linspace(0.8,1.2,5), fontsize=14)
+                plt.xlim(0.8, 1.2)
+                plt.ylim(0.8, 1.2)
                 
             plt.tight_layout(pad=2)
             
             fig.subplots_adjust(right=0.8)
-            cbar_ax = fig.add_axes([0.85, 0.15, 0.05, 0.7])
-            fig.colorbar(im1, cax=cbar_ax)
+            cbar_ax = fig.add_axes([0.82, 0.2, 0.01, 0.65])
+            cbar = fig.colorbar(im1, cax=cbar_ax, shrink=0.6)
+            cbar.ax.set_yticks(np.linspace(0,2.0/self.d,5))
+            cbar.ax.set_yticklabels(["{:.1%}".format(i) for i in np.linspace(0,2.0/self.d,5)], fontsize=12)
         
+            plt.savefig('beta-' + str(j) + '.pdf', format='pdf')
             plt.show()
         
         return S, beta

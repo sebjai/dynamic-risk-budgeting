@@ -169,7 +169,7 @@ class DynamicRiskParity():
                 self.theta[-1].gru = self.theta[0].gru
             
             self.theta_optimizer.append(optim.AdamW(self.theta[t].parameters(),
-                                                    lr = 0.001))
+                                                     lr=0.001))
             
             self.theta_scheduler.append(optim.lr_scheduler.StepLR(self.theta_optimizer[t],
                                                              step_size=100,
@@ -284,7 +284,7 @@ class DynamicRiskParity():
             
             # concatenate t_i, and asset prices    
             Y[t,...] = torch.cat(((t*self.dt)*ones, 
-                                  w[t-1,:].reshape(-1,1).detach(),
+                                  torch.zeros(batch_size,1).to(self.device), #wealth[t,:].reshape(-1,1).detach(),
                                   X[t,:,:]), axis=1).unsqueeze(axis=1)
             
             # push through the neural-net to get new number of assets
@@ -293,7 +293,6 @@ class DynamicRiskParity():
             
             w[t-1,:] = torch.sum(theta[t-1,:,:].detach() * X[t,:,:], axis=1) \
                 / torch.sum(theta[t,:,:].detach() * X[t,:,:], axis=1) 
-            # w[t-1,:] = 1.0
             
             var_theta[t,:,:] = theta[t,:,:].clone() * torch.prod(w[:t,:], axis=0).reshape(-1,1)
             
@@ -377,14 +376,6 @@ class DynamicRiskParity():
     def __F_Score__(self, h, Y, X):
         
         max_z = 5
-        
-        # if torch.max(X) > max_z:
-        #     print('X too large')
-        #     pdb.set_trace()
-        
-        # if torch.min(X) < -max_z:
-        #     print('X too small')
-        #     pdb.set_trace()
         
         N = 501
         z = torch.linspace(-max_z, max_z,N).reshape(N,1,1,1).repeat(1,Y.shape[0], Y.shape[1], 1).to(self.device)
@@ -542,8 +533,28 @@ class DynamicRiskParity():
             
             RC, RC_err = self.RiskContributions(500)
             self.RC.append(RC.cpu().detach().numpy())  
-                
-    def Train(self, n_iter=10_000, n_print = 10, M_value_iter = 10, M_policy_iter=1, batch_size=256, name=""):
+            
+    def print_state(self, n_iter, M_value_iter, M_F_iter, M_policy_iter, batch_size):
+        
+        print('T : ' , self.T)
+        print('d : ', self.d)
+        print('n_iter : ', n_iter)
+        print('M_value_iter : ', M_value_iter)
+        print('M_F_iter : ', M_F_iter)
+        print('M_policy_iter : ', M_policy_iter)
+        print('batch_size : ', batch_size)
+        
+        
+            
+    def Train(self, 
+              n_iter=10_000, 
+              n_print = 10, 
+              M_value_iter = 10, 
+              M_F_iter=10, 
+              M_policy_iter=1, 
+              batch_size=256, name=""):
+        
+        self.print_state(n_iter, M_value_iter, M_F_iter, M_policy_iter, batch_size)
         
         print("training value function on initialization...")
         self.__update_risktogo__(N_iter= 10, n_print=500, batch_size=batch_size)
@@ -560,7 +571,7 @@ class DynamicRiskParity():
             self.__update_risktogo__(N_iter=M_value_iter, n_print=500, batch_size=batch_size)
             
             # this udpates F
-            self.__update_F__(N_iter=10, n_print=500, batch_size=batch_size)
+            self.__update_F__(N_iter=M_F_iter, n_print=500, batch_size=batch_size)
             
             # this updates beta and w_0
             self.__update_policy__(N_iter=M_policy_iter, batch_size=batch_size)
@@ -599,11 +610,11 @@ class DynamicRiskParity():
             
             return f
         
-        bins=np.linspace(-3, 3, 51)
-        kde_bins = np.linspace(-3, 3, 501)
+        bins=np.linspace(-0.2, 0.2, 51)
+        kde_bins = np.linspace(-0.2, 0.2, 501)
         
-        V_bins=np.linspace(-3, 3, 51)
-        V_kde_bins = np.linspace(-3, 3, 501)
+        V_bins=np.linspace(0.05, 0.15, 51)
+        V_kde_bins = np.linspace(0.05, 0.15, 501)
         for i in range(self.T):
             
             plt.subplot(3,self.T, i+1)
@@ -629,9 +640,12 @@ class DynamicRiskParity():
             plt.xlabel(r'$c_' + str(i) + '\;+\;V_'+str(i+1) + '$', fontsize=16)
         
             plt.subplot(3,self.T, i+1 + 2*self.T)
-            plt.hist(V[i,:], bins=V_bins, density=True, alpha=0.5)
-            f = kde(V[i,:], V_kde_bins)
-            plt.plot(V_kde_bins,f,linewidth=1,color='r')
+            if i > 0:
+                plt.hist(V[i,:], bins=V_bins, density=True, alpha=0.5)
+                f = kde(V[i,:], V_kde_bins)
+                plt.plot(V_kde_bins,f,linewidth=1,color='r')
+            else:
+                plt.axvline(V[0,0],linewidth=1,color='r')
             plt.xlabel(r'$V_'+str(i) + '$', fontsize=16)
             
         plt.tight_layout()
@@ -659,8 +673,9 @@ class DynamicRiskParity():
     def MovingAverage(self,x, n):
         
         y = np.zeros(len(x))
+        y[0] = np.nan
         
-        for i in range(len(x)):
+        for i in range(1,len(x)):
             if i < n:
                 y[i] = np.mean(x[:i])
             else:
@@ -669,35 +684,49 @@ class DynamicRiskParity():
         return y
         
     def PlotSummary(self):
+
+        RC = np.array(self.RC)
+        RC_flat = RC.reshape(len(self.RC),-1)
+
         
         fig = plt.figure(figsize=(10,4))
         
-        plt.subplot(1,3,1)
-        RC = np.array(self.RC)
-        RC_flat = RC.reshape(len(self.RC),-1)
-        for i in range(RC_flat.shape[1]):
-            plt.plot(self.MovingAverage(RC_flat[:,i],100))
-        plt.ylabel('RC')
+        # plt.subplot(1,3,1)
+        # ymax = 0
+        # for i in range(RC_flat.shape[1]):
+        #     ma_RC = self.MovingAverage(RC_flat[:,i],100)
+        #     if np.max(ma_RC) > ymax :
+        #         ymax = 1.05*np.max(ma_RC)
+        #     plt.plot(ma_RC)
+        # plt.yscale('log')
+        # plt.ylim(0.1, ymax)
+        # plt.ylabel('RC')
         
         
-        plt.subplot(1,3,2)
+        plt.subplot(1,2,1)
         for t in range(self.T):
             plt.plot(self.MovingAverage(np.sum(RC[:,t,:], axis=1), 100), 
-                     label=r'$\sum \frac{RC_{' + str(t) + ',i}}{V_{' + str(t) + ',i}}$', linewidth=1) 
+                     label=r'$\frac{1}{\eta}\sum RC_{' + str(t) + ',i}$', linewidth=1) 
             
         plt.axhline(1.0, linestyle='--', color='k')
-        plt.ylim(0,2)
-        plt.legend(fontsize=12)
+        plt.ylim(0.5, 2)
+        plt.legend(fontsize=12,loc='upper right')
+        plt.yticks(fontsize=14)
+        plt.xticks(fontsize=14)
 
-        plt.subplot(1,3,3)
+        plt.subplot(1,2,2)
         V = np.array(self.V)
         for t in range(self.T):
-            plt.plot(V[:,t], label=r'$V_{'+str(t) + '}$', linewidth=1)
-        plt.axhline(self.eta, linestyle='--', color='k')
-        plt.ylim(0,2*self.eta)
+            plt.plot(self.MovingAverage(V[:,t],5), label=r'$V_{'+str(t) + '}$', linewidth=1)
+        plt.axhline(0.99*self.eta, linestyle='--', color='k')
+        plt.ylim(0.5*self.eta,2*self.eta)
         plt.legend(fontsize=12)
+        plt.yticks(fontsize=14)
+        plt.xticks(fontsize=14)
         
-        plt.tight_layout()
+        plt.tight_layout(pad=1.2)
+        
+        plt.savefig('sumRC_V.pdf', format='pdf')
         plt.show()      
         
         plt.figure(figsize=(10,4))
@@ -720,6 +749,7 @@ class DynamicRiskParity():
                 
         plt.suptitle(r'$RC$')
         plt.tight_layout()
+        plt.savefig('RC.pdf', format='pdf')
         plt.show()      
                 
        
@@ -778,7 +808,7 @@ class DynamicRiskParity():
                                 s=10, alpha=0.8, c=beta[j,:,k], 
                                 cmap='brg', vmin=0.3, vmax=0.7)
                 plt.scatter(S[j,0,0],S[j,0,1],
-                            s=50, 
+                            s=100, 
                             c = beta[j,0,k], 
                             facecolors=None,
                             edgecolors='k')
@@ -787,7 +817,7 @@ class DynamicRiskParity():
                 plt.xticks(fontsize=16)
                 plt.yticks(fontsize=16)
                 plt.xlim(0.7, 1.4)
-                plt.ylim(0.8, 1.3)
+                plt.ylim(0.7, 1.4)
                 
             plt.tight_layout(pad=2)
             
@@ -795,6 +825,7 @@ class DynamicRiskParity():
             cbar_ax = fig.add_axes([0.85, 0.15, 0.05, 0.7])
             fig.colorbar(im1, cax=cbar_ax)
         
+            plt.savefig('beta-' + str(j) + '.pdf', format='pdf')
             plt.show()
         
         return S, beta
