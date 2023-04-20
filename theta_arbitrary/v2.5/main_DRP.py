@@ -30,5 +30,5 @@ DRP.Train(n_iter=10_000,
           M_value_iter=5, 
           M_F_iter=5,
           M_policy_iter=1,  
-          batch_size=4096,
-          name="n5_T3_p75")
+          batch_size=2048,
+          name="n2_T3_p75")

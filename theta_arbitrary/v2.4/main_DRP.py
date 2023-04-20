@@ -14,7 +14,7 @@ import os
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 #%%
-Simulator = Simulator_OU(n_assets=2, T=2)
+Simulator = Simulator_OU(n_assets=2, T=3)
 
 DRP = DynamicRiskParity(Simulator=Simulator, alpha=0.75, p=0.75)
 DRP.eta = 0.1
@@ -30,5 +30,5 @@ DRP.Train(n_iter=10_000,
           M_value_iter=5, 
           M_policy_iter=2, 
           batch_size=512,
-          name="n2_T2_p75")
+          name="n2_T3_p75")
 
