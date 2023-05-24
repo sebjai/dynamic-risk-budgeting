@@ -161,22 +161,20 @@ class dynamic_risk_budget():
     
         return optimizer, scheduler
     
-    def __restart_sched__(self, sched_step_size=100):
-        
-        self.RC = []
-        self.V = []
-        
-        self.sched_step_size = sched_step_size
-        
+    def __reset_optim_sched__(self):
+
         for t in range(self.T):
             optimizer, scheduler = self.__get_optim_sched__(self.theta[t])
             self.theta_optimizer[t] = optimizer
             self.theta_scheduler[t] = scheduler
-
+            
         self.F_optimizer, self.F_scheduler = self.__get_optim_sched__(self.F)
-        
         self.cond_RM_optimizer, self.cond_RM_scheduler = self.__get_optim_sched__(self.cond_RM)
         
+        # self.RC = []
+        # self.V = []
+        
+
     def __initialize_nets__(self, device='cpu'):
         
         # the theta network...
@@ -212,7 +210,7 @@ class dynamic_risk_budget():
         
         self.F_optimizer, self.F_scheduler = self.__get_optim_sched__(self.F)
         
-        # for conditional mu, VaR, CVaR-VaR -- need to apply softplus to 3rd output
+        # for conditional rho, VaR, CVaR-VaR -- need to apply softplus to 3rd output
         self.cond_RM = net(nIn=self.d+2, nOut=3,
                                gru_hidden=self.env.n, gru_layers=5,
                                linear_hidden=32, linear_layers=5,
@@ -220,15 +218,13 @@ class dynamic_risk_budget():
         self.cond_RM_target = copy.deepcopy(self.cond_RM)
         self.cond_RM_optimizer, self.cond_RM_scheduler = self.__get_optim_sched__(self.cond_RM)
                 
-        self.risk_measure = lambda mu, CVaR :  (self.p * CVaR + (1.0-self.p)* mu)
-        
     def __strip_cond_RM__(self, cond_RM):
         
-        mu = cond_RM[...,0]
+        rho = cond_RM[...,0]
         psi = cond_RM[...,1]
         chi = self.cond_RM.softplus( cond_RM[...,2] )
         
-        return mu, psi, psi+chi
+        return rho, psi, psi+chi
         
     def __run_epoch__(self, batch_size = 256):
         
@@ -275,10 +271,6 @@ class dynamic_risk_budget():
             wealth[t,:] = torch.sum( var_theta[t-1,:,:] * X[t,:,:], axis=1).clone()
             
             # concatenate t_i, and asset prices    
-            # Y[t,...] = torch.cat(((t*self.dt)*ones, 
-            #                       torch.zeros(batch_size,1).to(self.device), #wealth[t,:].reshape(-1,1).detach(),
-            #                       X[t,:,:]), axis=1).unsqueeze(axis=1)
-            
             Y[t,...] = torch.cat(((t*self.dt)*ones, 
                                   wealth[t,:].reshape(-1,1).detach(),
                                   X[t,:,:]), axis=1).unsqueeze(axis=1)
@@ -300,7 +292,7 @@ class dynamic_risk_budget():
         
         return costs, h, Y, beta, theta, var_theta, w, X, wealth
     
-    def __V_Score__(self, VaR, CVaR, mu, X):
+    def __V_Score__(self, rho, VaR, CVaR, X):
         
         C = 1
         xmax = torch.max(torch.abs(X))
@@ -313,8 +305,8 @@ class dynamic_risk_budget():
         # for conditional VaR & CVaR
         score = torch.mean(torch.log( (CVaR+C)/(X+C)) - (CVaR/(CVaR+C)) + A/B)
         
-        # for conditional mean
-        score += torch.mean((mu-X)**2)
+        # for conditional rho
+        score += torch.mean(((rho-self.p*CVaR)/(1-self.p)-X)**2)
         
         return score
 
@@ -325,9 +317,9 @@ class dynamic_risk_budget():
                          Y.shape[1], 
                          self.cond_RM.gru.hidden_size)).to(self.device)
         
-        mu = torch.zeros(self.T, Y.shape[1]).to(self.device)
-        VaR = mu.clone()
-        CVaR = mu.clone()
+        rho = torch.zeros(self.T, Y.shape[1]).to(self.device)
+        VaR = rho.clone()
+        CVaR = rho.clone()
         
         for t in range(self.T):
             
@@ -336,13 +328,13 @@ class dynamic_risk_budget():
             else:
                 h[t+1,...], cond_RM = self.cond_RM_target(h[t,...], Y[t,...])
                 
-            mu[t,...], VaR[t,...], CVaR[t,...] = self.__strip_cond_RM__(cond_RM)
+            rho[t,...], VaR[t,...], CVaR[t,...] = self.__strip_cond_RM__(cond_RM)
             
-        mu = mu.unsqueeze(axis=-1)    
+        rho = rho.unsqueeze(axis=-1)    
         VaR = VaR.unsqueeze(axis=-1)
         CVaR = CVaR.unsqueeze(axis=-1)
         
-        return mu, VaR, CVaR
+        return rho, VaR, CVaR
     
     
     def __update_risktogo__(self, N_iter  = 100, batch_size = 256, n_print=100):
@@ -355,11 +347,10 @@ class dynamic_risk_budget():
             theta = theta.detach()            
             Y = Y.detach()
             
-            mu_target, VaR_target, CVaR_target = self.get_risk_measure(Y, target=True)
-            mu_target = mu_target.detach()
-            CVaR_target = CVaR_target.detach()
+            rho_target, _, _ = self.get_risk_measure(Y, target=True)
+            rho_target = rho_target.detach()
             
-            mu, VaR, CVaR = self.get_risk_measure(Y, target=False)
+            rho, VaR, CVaR = self.get_risk_measure(Y, target=False)
 
             self.cond_RM_optimizer.zero_grad()
             
@@ -370,12 +361,11 @@ class dynamic_risk_budget():
                 A = torch.sum(theta[t,:,:] * dX[t,:,:], axis=1).reshape(-1,1)
                 
                 if t < self.T-1:
-                    A += w[t,:].reshape(-1,1) *  self.risk_measure(mu_target[t+1,...],
-                                                                   CVaR_target[t+1,...])
+                    A += w[t,:].reshape(-1,1) *  rho_target[t+1,...]
                     
-                loss += self.__V_Score__(VaR[t,...], 
+                loss += self.__V_Score__(rho[t,...],
+                                         VaR[t,...], 
                                          CVaR[t,...], 
-                                         mu[t,...], 
                                          A.detach())
 
             loss.backward()
@@ -435,10 +425,9 @@ class dynamic_risk_budget():
             theta = theta.detach()
             Y = Y.detach()
             
-            mu_target, VaR_target, CVaR_target = self.get_risk_measure(Y, target=True)
+            rho_target, _, _ = self.get_risk_measure(Y, target=True)
             
-            mu_target = mu_target.detach()
-            CVaR_target = CVaR_target.detach()
+            rho_target = rho_target.detach()
             
             z, F = self.get_F(Y)
             
@@ -451,8 +440,7 @@ class dynamic_risk_budget():
                 A = torch.sum( theta[t,:,:] * dX[t,:,:], axis=1).reshape(-1,1)
                         
                 if t < self.T-1:
-                    A += w[t,:].reshape(-1,1)* self.risk_measure(mu_target[t+1,...],
-                                                                 CVaR_target[t+1,...])
+                    A += w[t,:].reshape(-1,1)* rho_target[t+1,...]
                 
                 loss += self.__F_Score__(z, F[t,...], A.detach())                
                 
@@ -466,12 +454,12 @@ class dynamic_risk_budget():
         
         batch_size = theta.shape[1]
         
-        mu, VaR, CVaR = self.get_risk_measure(Y, target=True)
+        rho, _, _ = self.get_risk_measure(Y, target=True)
         
         # compute the value function at points in time
         V = torch.zeros((self.T+1, batch_size)).to(self.device)
         for t in range(self.T):
-            V[t,:] = self.risk_measure(mu[t,...], CVaR[t,...]).squeeze()
+            V[t,:] = rho[t,...].squeeze()
         
         U = torch.zeros((self.T, batch_size)).to(self.device)
 
@@ -610,9 +598,17 @@ class dynamic_risk_budget():
             
             if np.mod(count, n_print)==0:
                 
-                self.plot_summary()
-                self.plot_paths(500)
-                self.plot_hist()
+                # self.plot_summary()
+                # self.plot_paths(500)
+                # self.plot_hist()
+                
+                from plotter import plotter
+                
+                pl = plotter(self)
+
+                pl.plot_summary(len(self.V))
+                pl.plot_RC(len(self.V))
+                pl.plot_beta()
                 
                 date_time = datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
                 dill.dump(self, open(self.name + '_' + date_time + '.pkl','wb'))   

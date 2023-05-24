@@ -20,40 +20,39 @@ os.environ['KMP_DUPLICATE_LIB_OK']='True'
 import matplotlib.pyplot as plt
 plt.style.use('paper.mplstyle')
 
-pl = plotter(drb)
+# pl = plotter(drb)
 
-pl.plot_summary(5_000)
-pl.plot_RC(5_000)
-pl.plot_beta()
-
-#%%
-filenames= ['p50_heston_04-07-2023_16-26-51.pkl',
-            'p75_heston_04-07-2023_16-26-39.pkl',
-            'p100_heston_04-07-2023_16-26-38.pkl']
+# pl.plot_summary(5_000)
+# pl.plot_RC(5_000)
+# pl.plot_beta()
 
 #%%
-for file in filenames:
+filenames= ['unequalB_p50_alpha75_heston_04-29-2023_16-29-15.pkl',
+            'unequalB_p60_alpha75_heston_04-29-2023_17-04-25.pkl',
+            'unequalB_p70_alpha75_heston_04-29-2023_17-39-39.pkl',
+            'unequalB_p80_alpha75_heston_04-29-2023_18-15-06.pkl',
+            'unequalB_p90_alpha75_heston_04-29-2023_18-49-41.pkl']
+
+# filenames= ['p50_alpha75_heston_04-29-2023_16-26-50.pkl',
+#             'p60_alpha75_heston_04-29-2023_17-01-45.pkl',
+#             'p70_alpha75_heston_04-29-2023_17-36-42.pkl',
+#             'p80_alpha75_heston_04-29-2023_18-11-51.pkl',
+#             'p90_alpha75_heston_04-29-2023_18-47-06.pkl']
+
+# filenames= ['unequalB_p50_alpha75_heston_04-29-2023_16-29-15.pkl']
+
+#%%
+for i, file in enumerate(filenames):
     drb = dill.load(open(file,'rb'))
     pl = plotter(drb)
-    pl.plot_summary()
-    pl.plot_RC()
     
-#%%
-for file in filenames:
-    drb = dill.load(open(file,'rb'))
-    pl = plotter(drb)
-    pl.plot_wealth()
+    # if i ==0 :
+    #     n = len(drb.V)
+    # else:
+    #     n = 1000
+    # pl.plot_summary(n)
+    # pl.plot_RC(n)
     
-#%%
-for file in filenames:
-    drb = dill.load(open(file,'rb'))
-    pl = plotter(drb)
-    pl.plot_beta()
+    pl.plot_beta(60)
     
-#%%
-# pl = plotter(dill.load(open('p75_alpha90_heston_04-11-2023_17-34-22.pkl','rb')))
-pl = plotter(dill.load(open('p75_alpha90_heston_04-11-2023_16-10-08.pkl','rb')))
-#%%
-pl.plot_summary(4_000)
-pl.plot_RC(4_000)
-pl.plot_beta()
+

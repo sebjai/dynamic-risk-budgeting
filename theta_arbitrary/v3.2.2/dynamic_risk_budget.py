@@ -160,6 +160,20 @@ class dynamic_risk_budget():
                                               gamma=0.99)
     
         return optimizer, scheduler
+    
+    def __reset_optim_sched__(self):
+
+        for t in range(self.T):
+            optimizer, scheduler = self.__get_optim_sched__(self.theta[t])
+            self.theta_optimizer[t] = optimizer
+            self.theta_scheduler[t] = scheduler
+            
+        self.F_optimizer, self.F_scheduler = self.__get_optim_sched__(self.F)
+        self.cond_RM_optimizer, self.cond_RM_scheduler = self.__get_optim_sched__(self.cond_RM)
+        
+        # self.RC = []
+        # self.V = []
+        
 
     def __initialize_nets__(self, device='cpu'):
         

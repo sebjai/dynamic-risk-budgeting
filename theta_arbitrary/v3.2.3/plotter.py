@@ -49,7 +49,7 @@ class plotter():
         plt.subplot(1,2,1)
         for t in range(self.drb.T):
             
-            mv, mv_err = self.moving_average(np.sum(RC[:,t,:], axis=1), 100)
+            mv, mv_err = self.moving_average(np.sum(RC[-n_iter:,t,:], axis=1), 100)
             
             plt.fill_between(np.arange(len(mv)), mv-mv_err, mv+mv_err, alpha=0.2)
             plt.plot(mv, label=r'$\sum RC_{' + str(t) + ',i}$', linewidth=1) 
@@ -69,7 +69,7 @@ class plotter():
         for t in range(self.drb.T):
             # plt.plot(V[:,t], linewidth=1, alpha=0.2)
             
-            mv, mv_err = self.moving_average(V[:,t]/self.drb.eta,100)
+            mv, mv_err = self.moving_average(V[-n_iter:,t]/self.drb.eta,100)
             
             plt.fill_between(np.arange(len(mv)), y1=mv-mv_err, y2=mv+mv_err, alpha=0.2)
             plt.plot(mv, label=r'$\mathfrak{R}_{'+str(t) + '}$', linewidth=1.5)
@@ -88,12 +88,116 @@ class plotter():
         plt.savefig(self.drb.name + '_' + 'sumRC_V.pdf', format='pdf')
         plt.show()      
         
+        
+    def plot_loss_beta(self, n_iter=3_000):
+        
+        
+        costs, _, Y, beta, theta, var_theta, w, X, wealth = self.drb.__run_epoch__(5_000)
+        
+        beta=beta.detach().cpu().numpy()
+        
+        xmin=0.05
+        xmax=0.45
+        bins = np.linspace(xmin,xmax,501)
+        
+        c = ['b', 'orange', 'g']
+        
+        ylim=35
+        
+        V = np.array(self.drb.V)
+        
+        ticks = np.arange(6)*int(n_iter/6)
+        n = np.linspace(10,n_iter,100)
+        
+        k = 0
+        
+        
+        for i, j in enumerate(n):
+        
+            fig = plt.figure(figsize=(10,4))
+            
+            plt.subplot(1,2,1)
+            for t in range(self.drb.T):
+                # plt.plot(V[:,t], linewidth=1, alpha=0.2)
+                
+                mv, mv_err = self.moving_average(V[:int(j),t]/self.drb.eta,100)
+                
+                plt.fill_between(np.arange(len(mv)), y1=mv-mv_err, y2=mv+mv_err, alpha=0.2)
+                plt.plot(mv, label=r'$\mathfrak{R}_{'+str(t) + '}$', linewidth=1.5)
+                
+            plt.axhline(1, linestyle='--', color='k', alpha=0.8)
+            
+            plt.ylim(0.5, 2)
+            plt.xlim(0,3_000)
+            
+            plt.legend(fontsize=16)
+            plt.yticks(fontsize=14)
+            plt.xticks(fontsize=14, ticks=ticks)
+            
+            if np.mod(i+1, 20) == 0:
+                k+= 1
+                
+            plt.title(r'Risk-to-go')
+            
+            plt.subplot(1,2,2)
+            for j in range(self.drb.T):
+            
+                if j > 0:
+                    plt.hist(beta[j,:,k], np.linspace(xmin,xmax,101), density=True, alpha=0.5, color=c[j])
+                    
+                    h = 1.06*np.std(beta[j,:,k])*(len(beta[j,:,k]))**(-1/5)
+                    f = self.kde(bins, beta[j,:,k], h)
+                    plt.plot(bins, f, label=r'$t=' + str(j) + '$', color=c[j], linewidth=1.5)
+                else:
+                    plt.axvline(beta[j,0,k], label=r'$t=' + str(j) + '$', color=c[j], linewidth=1.5)
+            
+            plt.legend(fontsize=12)
+            if ylim is not None:
+                plt.ylim(0,ylim)
+            plt.xlim(xmin,xmax)            
+            plt.title(r'$\beta_' + str(k+1) +'$')
+            
+            plt.tight_layout(pad=2)
+            
+            plt.savefig(self.drb.name + '_' + 'V_beta_' + str(i) + '.png', format='png')
+            plt.show()        
+        
+    def plot_loss(self, n_iter=3_000):
+        
+        V = np.array(self.drb.V)
+        
+        ticks = np.arange(6)*int(n_iter/6)
+        n = np.linspace(10,n_iter,100)
+        
+        for i, j in enumerate(n):
+            for t in range(self.drb.T):
+                # plt.plot(V[:,t], linewidth=1, alpha=0.2)
+                
+                mv, mv_err = self.moving_average(V[:int(j),t]/self.drb.eta,100)
+                
+                plt.fill_between(np.arange(len(mv)), y1=mv-mv_err, y2=mv+mv_err, alpha=0.2)
+                plt.plot(mv, label=r'$\mathfrak{R}_{'+str(t) + '}$', linewidth=1.5)
+                
+            plt.axhline(1, linestyle='--', color='k', alpha=0.8)
+            
+            plt.ylim(0.5, 2)
+            plt.xlim(0,3_000)
+            
+            plt.legend(fontsize=16)
+            plt.yticks(fontsize=14)
+            plt.xticks(fontsize=14, ticks=ticks)
+            
+            plt.tight_layout(pad=2)
+            
+            plt.savefig(self.drb.name + '_' + 'sumRC_V_' + str(i) + '.png', format='png')
+            plt.show()
+        
     def plot_RC(self, n_iter):
         
         RC = np.array(self.drb.RC)
         
         fig, ax= plt.subplots(nrows=self.drb.d, ncols=self.drb.T,
-                              sharex=True, sharey=True,
+                              sharex=True,
                               figsize=(8,6))
         
         B = self.drb.B.cpu().numpy()
@@ -103,13 +207,13 @@ class plotter():
         for k in range(self.drb.d):
             for j in range(self.drb.T):
         
-                mv, mv_err = self.moving_average(RC[:,j,k],100)
+                mv, mv_err = self.moving_average(RC[-n_iter:,j,k],100)
                 
                 ax[k,j].fill_between(np.arange(len(mv)), y1=mv-mv_err, y2=mv+mv_err, alpha=0.5)
                 ax[k,j].plot(mv, color='r')
-                ax[k,j].axhline(self.drb.B[j,0,k].cpu(), linestyle='--', color='k', alpha=0.8)
+                ax[k,j].axhline(B[j,0,k], linestyle='--', color='k', alpha=0.8)
                 
-                ax[k,j].set_ylim(0, 2*B[j,0,k])
+                ax[k,j].set_ylim(B[j,0,k]/2, 2*B[j,0,k])
                 
                 if j == self.drb.T-1:
                     
@@ -122,48 +226,48 @@ class plotter():
                 ax[k,j].set_xlim(0, n_iter)
                 ax[k,j].set_xticks(ticks=ticks, fontsize=12)
                 ax[k,j].xaxis.set_major_formatter(mtick.FuncFormatter(lambda x, pos: '{:.0f}K'.format(x*1e-3)))
-                ax[k,j].set_yticks([0.1, 0.3], fontsize=12)
+                ax[k,j].set_yticks([B[j,0,k]/2, 2*B[j,0,k]], fontsize=12)
                 
         plt.tight_layout()
         plt.savefig(self.drb.name + '_RC.pdf', format='pdf')
         plt.show()
         
-    def plot_wealth(self):
+    # def plot_wealth(self):
         
-        print(self.drb.name)
-        costs, _, Y, beta, theta, var_theta, w, X, wealth = self.drb.__run_epoch__(100_000)
+    #     print(self.drb.name)
+    #     costs, _, Y, beta, theta, var_theta, w, X, wealth = self.drb.__run_epoch__(100_000)
         
-        w = wealth.detach().cpu().numpy()
+    #     w = wealth.detach().cpu().numpy()
         
-        w /= w[0,:]
-        
-        
-        xmin = 0.7
-        xmax = 1.3
-        
-        bins = np.linspace(xmin, xmax, 501)
+    #     w /= w[0,:]
         
         
-        fig, ax = plt.subplots(1,self.drb.T-1)
+    #     xmin = 0.7
+    #     xmax = 1.3
         
-        for t in range(1, self.drb.T):
+    #     bins = np.linspace(xmin, xmax, 501)
+        
+        
+    #     fig, ax = plt.subplots(1,self.drb.T-1)
+        
+    #     for t in range(1, self.drb.T):
             
-            h = 1.06*np.std(w[t,:])*(len(w[t,:]))**(-1/5)
-            kde = self.kde(bins, w[t,:], h)
+    #         h = 1.06*np.std(w[t,:])*(len(w[t,:]))**(-1/5)
+    #         kde = f(bins, w[t,:], h)
             
-            ax[t-1].hist(w[t,:], np.linspace(xmin, xmax,101), density=True)
-            ax[t-1].plot(bins, kde)
-            ax[t-1].set_ylim(0, 9)
+    #         ax[t-1].hist(w[t,:], np.linspace(xmin, xmax,101), density=True)
+    #         ax[t-1].plot(bins, kde)
+    #         ax[t-1].set_ylim(0, 9)
             
-            qtl = np.quantile(w[t,:], 0.1)
-            print(np.mean(w[t,:]), np.mean(w[t, w[t,:]<qtl]))
+    #         qtl = np.quantile(w[t,:], 0.1)
+    #         print(np.mean(w[t,:]), np.mean(w[t, w[t,:]<qtl]))
             
-        plt.tight_layout(pad=2)
-        plt.savefig(self.drb.name + '_wealth.pdf', format='pdf')
-        plt.show()
+    #     plt.tight_layout(pad=2)
+    #     plt.savefig(self.drb.name + '_wealth.pdf', format='pdf')
+    #     plt.show()
         
         
-    def plot_beta(self):
+    def plot_beta(self, ylim=None):
         
         costs, _, Y, beta, theta, var_theta, w, X, wealth = self.drb.__run_epoch__(5_000)
         
@@ -195,7 +299,8 @@ class plotter():
             ax[k].set_ylabel(r'$i='+str(k+1) + '$')
             if k == 0:
                 ax[k].legend(fontsize=12)
-            ax[k].set_ylim(0,35)
+            if ylim is not None:
+                ax[k].set_ylim(0,ylim)
             ax[k].set_xlim(xmin,xmax)
                 
         plt.tight_layout()

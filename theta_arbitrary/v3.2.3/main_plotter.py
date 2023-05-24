@@ -20,39 +20,38 @@ os.environ['KMP_DUPLICATE_LIB_OK']='True'
 import matplotlib.pyplot as plt
 plt.style.use('paper.mplstyle')
 
-#%%
-filenames= ['p60_alpha75_heston_04-13-2023_12-08-01.pkl',
-            'p70_alpha75_heston_04-13-2023_12-58-22.pkl',
-            'p80_alpha75_heston_04-13-2023_13-48-40.pkl',
-            'p90_alpha75_heston_04-13-2023_14-38-42.pkl']
+# pl = plotter(drb)
 
+# pl.plot_summary(5_000)
+# pl.plot_RC(5_000)
+# pl.plot_beta()
 
-filenames = ['p100_alpha95_heston_04-13-2023_21-30-00.pkl']
 #%%
-for file in filenames:
+filenames =['p50_alpha75_heston_05-01-2023_19-25-25.pkl',
+            'p60_alpha75_heston_05-01-2023_20-09-03.pkl',
+            'p70_alpha75_heston_05-01-2023_20-53-15.pkl',
+            'p80_alpha75_heston_05-01-2023_21-37-05.pkl',
+            'p90_alpha75_heston_05-01-2023_22-21-09.pkl',
+            'unequalB_p50_alpha75_heston_05-01-2023_19-26-40.pkl',
+            'unequalB_p60_alpha75_heston_05-01-2023_20-10-17.pkl',
+            'unequalB_p70_alpha75_heston_05-01-2023_20-54-30.pkl',
+            'unequalB_p80_alpha75_heston_05-01-2023_21-38-21.pkl',
+            'unequalB_p90_alpha75_heston_05-01-2023_22-22-06.pkl']
+
+# filenames= ['unequalB_p50_alpha75_heston_04-29-2023_16-29-15.pkl']
+
+#%%
+for i, file in enumerate(filenames):
     drb = dill.load(open(file,'rb'))
     pl = plotter(drb)
-    # pl.plot_summary(1_000)
-    # pl.plot_RC(1_000)
-    # pl.plot_beta()
-    pl.plot_wealth()
     
-#%%
-for file in filenames:
-    drb = dill.load(open(file,'rb'))
-    pl = plotter(drb)
-    pl.plot_wealth()
+    # if i ==0 :
+    #     n = len(drb.V)
+    # else:
+    #     n = 1000
+    # pl.plot_summary(n)
+    # pl.plot_RC(n)
     
-#%%
-for file in filenames:
-    drb = dill.load(open(file,'rb'))
-    pl = plotter(drb)
-    pl.plot_beta()
+    pl.plot_beta(35)
     
-#%%
-# pl = plotter(dill.load(open('p75_alpha90_heston_04-11-2023_17-34-22.pkl','rb')))
-pl = plotter(dill.load(open('p75_alpha90_heston_04-11-2023_16-10-08.pkl','rb')))
-#%%
-pl.plot_summary(4_000)
-pl.plot_RC(4_000)
-pl.plot_beta()
+

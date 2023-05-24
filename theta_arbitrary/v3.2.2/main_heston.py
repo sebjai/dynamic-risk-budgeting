@@ -15,7 +15,7 @@ plt.style.use('paper.mplstyle')
 
 #%%
 env=heston(n_assets=5, T=3)
-S, v= env.simulate(10_000)
+S, v= env.simulate(100_000)
 
 def kde(x, z):
     
@@ -50,8 +50,9 @@ def plot(x, ylim):
         # plt.hist(x[:,-1,i].T, alpha=0.5, density=True, bins=np.linspace(ylim[0],ylim[1],51))
         plt.plot(z, f, label= r'$i={0:1d}$'.format(i+1), linewidth=1.5)
     
-    plt.xlabel(r'$\log(X_{2,i}/X_{0,i})$')
-    plt.ylim(0,10)
+    plt.xlabel(r'$\log(X_{3,i}/X_{0,i})$')
+    plt.ylim(0.1,11)
+    plt.yscale('log')
     plt.legend()
     plt.savefig('heston_asset.pdf',  bbox_inches='tight', format='pdf')
     plt.show()    
